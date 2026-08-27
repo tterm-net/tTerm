@@ -966,6 +966,19 @@ async def test_machines_view() -> None:
     from tterm.bot import machines as _m
     cmd = "curl -sSL https://example/s/tok | sudo sh"
     btn = _m.copy("Copy command", cmd).model_dump(exclude_none=True, mode="json")
+    # Confirming a server must end with the prompt, exactly like picking one:
+    # otherwise there is no telling where you landed and the session stays cold.
+    check("confirming a server shows the prompt",
+          handlers_all.count("send_prompt(") >= 3,
+          "one definition plus a call from cb_use and cb_confirm")
+
+    # Button labels sit in one row only while they are short. Long ones wrap
+    # and the screen turns into a stack.
+    import re as _re5
+    labels = _re5.findall(r'machines\.(?:copy|link|back)\(\s*"([^"]+)"', handlers_all)
+    long_labels = [x for x in labels if len(x) > 14]
+    check("button labels stay short", not long_labels, str(long_labels))
+
     check("the copy button carries the exact command",
           btn["copy_text"]["text"] == cmd, str(btn))
 

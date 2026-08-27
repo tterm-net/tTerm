@@ -447,10 +447,9 @@ async def cb_add_windows(call: CallbackQuery) -> None:
          machines.para("Commands go to the Linux environment, not to Windows "
                        "itself — but your drives are visible there, and for "
                        "most tasks that is enough.")],
-        [[machines.copy("Copy command", cmd),
-          machines.link("What the script does",
-                        f"{config.PUBLIC_URL}/a/{agent_token}")],
-         [machines.link("How to install WSL2",
+        [[machines.copy("Copy", cmd),
+          machines.link("Read it", f"{config.PUBLIC_URL}/a/{agent_token}"),
+          machines.link("Install WSL2",
                         "https://learn.microsoft.com/windows/wsl/install"),
           machines.back()]],
     )
@@ -477,16 +476,15 @@ async def cb_add_server(call: CallbackQuery) -> None:
 
     minutes = config.ENROLL_TOKEN_TTL_SECONDS // 60
     rich = machines.screen(
-        [machines.para(machines.bold("Connecting a server")),
-         machines.para("Run this on it:"),
+        [machines.para(machines.bold("Connect a server")),
+         machines.para("Run this on the server:"),
          {"type": "pre", "text": cmd},
-         machines.para(f"Waiting. The link is valid for {minutes} minutes."),
          machines.para(machines.italic(
-             "Don't trust a one-liner? Open the script and read it, "
-             "it is short."))],
-        [[machines.copy("Copy command", cmd),
-          machines.link("What the script does", f"{config.PUBLIC_URL}/s/{token}")],
-         [machines.back()]],
+             f"Valid for {minutes} minutes. The script is short — "
+             "read it first if you like."))],
+        [[machines.copy("Copy", cmd),
+          machines.link("Read it", f"{config.PUBLIC_URL}/s/{token}"),
+          machines.back()]],
     )
     kb = InlineKeyboardBuilder()
     kb.button(text="What the script does", url=f"{config.PUBLIC_URL}/s/{token}")
@@ -519,20 +517,17 @@ async def cb_add_agent(call: CallbackQuery) -> None:
     cmd = f"curl -fsSL {config.PUBLIC_URL}/a/{token} | sh"
 
     rich = machines.screen(
-        [machines.para(machines.bold("Connecting a computer")),
+        [machines.para(machines.bold("Connect a computer")),
          machines.para("Run this on the machine you are connecting:"),
          {"type": "pre", "text": cmd},
          machines.para(machines.bold("No sudo."),
-                       " The agent runs with your own user's permissions "
-                       "and opens no ports."),
-         machines.para("I will write here once it connects. "
-                       "The machine name fills in by itself."),
-         machines.para(machines.italic("macOS and Linux. "
-                                       "Windows is not supported yet."))],
-        [[machines.copy("Copy command", cmd),
-          machines.link("What the script does", f"{config.PUBLIC_URL}/a/{token}")],
-         [machines.link("Agent source code",
-                        "https://github.com/tterm-net/tterm-agent"),
+                       " The agent uses your own permissions and opens "
+                       "no ports."),
+         machines.para(machines.italic(
+             "macOS and Linux. I will write here once it connects."))],
+        [[machines.copy("Copy", cmd),
+          machines.link("Read it", f"{config.PUBLIC_URL}/a/{token}"),
+          machines.link("Source", "https://github.com/tterm-net/tterm-agent"),
           machines.back()]],
     )
     kb = InlineKeyboardBuilder()
@@ -618,15 +613,16 @@ async def cb_confirm(call: CallbackQuery) -> None:
         call.bot, call.message.chat.id,
         machines.screen(
             [machines.para(f"{SERVER_ICON} ", machines.bold(host.name),
-                           " is connected and active."),
-             machines.para("Just type commands into the chat, "
-                           "like in a terminal."),
-             machines.para("Try: ", machines.code("uptime"))],
+                           " connected"),
+             machines.para(machines.italic(
+                 "Type commands straight into the chat."))],
             [],
         ),
         call,
-        f"{SERVER_ICON} <b>{html.escape(host.name)}</b> is connected and active.",
+        f"{SERVER_ICON} <b>{html.escape(host.name)}</b> connected",
     )
+    # Same as picking a machine: show where we landed and warm up the session.
+    await send_prompt(call.bot, call.message.chat.id, call.from_user.id, host)
 
 
 @router.callback_query(F.data.startswith("reject:"))
@@ -668,6 +664,34 @@ async def cmd_use(message: Message) -> None:
     await show_machines(message.bot, message.chat.id, message.from_user.id)
 
 
+async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host) -> None:
+    """Sends the prompt for a machine.
+
+    Without it there is no telling which directory we landed in, whether it is
+    a git repo, or who we run as. It also warms up the session so the first
+    real command answers faster.
+    """
+    icon = PC_ICON if host.kind == "agent" else SERVER_ICON
+    try:
+        block = await sessions.execute(user_id, host, "true")
+    except Exception as exc:
+        await bot.send_message(
+            chat_id,
+            f"{icon} <b>{html.escape(host.name)}</b>\n"
+            f"<i>{html.escape(str(exc)[:200])}</i>",
+            parse_mode=ParseMode.HTML)
+        return
+
+    block.state.host = host.name
+    block.state.icon = icon
+    # No status dot here: the machine button in the list already carries it.
+    await bot.send_message(
+        chat_id,
+        f"{icon} <b>{html.escape(host.name)}</b>\n"
+        f"<code>{html.escape(block.state.prompt())}</code>",
+        parse_mode=ParseMode.HTML)
+
+
 @router.callback_query(F.data.startswith("use:"))
 async def cb_use(call: CallbackQuery) -> None:
     host_id = int(call.data.split(":")[1])  # type: ignore[union-attr]
@@ -679,32 +703,10 @@ async def cb_use(call: CallbackQuery) -> None:
     await db.set_active_host(call.from_user.id, host_id)
     await call.answer(f"{host.name} is active")
 
-    icon = PC_ICON if host.kind == "agent" else SERVER_ICON
     await show_machines(call.bot, call.message.chat.id if call.message
                         else call.from_user.id, call.from_user.id, call)
-
-    # Show the prompt: without it there is no telling which directory we
-    # landed in, whether it is a git repo, or who we run as. It also warms up
-    # the session so the first real command answers faster.
-    if call.message is None:
-        return
-    try:
-        block = await sessions.execute(call.from_user.id, host, "true")
-    except Exception as exc:
-        await call.message.answer(
-            f"{icon} <b>{html.escape(host.name)}</b>\n"
-            f"<i>{html.escape(str(exc)[:200])}</i>",
-            parse_mode=ParseMode.HTML)
-        return
-
-    block.state.host = host.name
-    block.state.icon = icon
-    # No status dot here on purpose: the machine button in the list already
-    # carries it, and repeating it in every message adds nothing.
-    await call.message.answer(
-        f"{icon} <b>{html.escape(host.name)}</b>\n"
-        f"<code>{html.escape(block.state.prompt())}</code>",
-        parse_mode=ParseMode.HTML)
+    if call.message is not None:
+        await send_prompt(call.bot, call.message.chat.id, call.from_user.id, host)
 
 
 # ---------------------------------------------------------------- sharing
