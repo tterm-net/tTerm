@@ -1,0 +1,43 @@
+# === SECRETS. Never commit these. ===
+# .env holds the bot token — it is the bot's password.
+.env
+.env.*
+!.env.example
+
+# data/ holds the CA key. A leak means access to every connected server.
+data/
+*.pem
+*_ed25519
+*_rsa
+*.key
+
+# === Python environment ===
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Editors and OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# === Logs and temporary files ===
+*.log
+*.db
+*.sqlite3
+tmp/
+
+# === Working notes, not part of the product ===
+# The Russian development journal and the project context we keep for
+# ourselves: bug post-mortems, rejected options, plans. Useful to us,
+# noise to anyone else.
+JOURNAL.md
+PROJECT.md

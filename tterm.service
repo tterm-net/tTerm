@@ -1,0 +1,28 @@
+[Unit]
+Description=tTerm — a terminal in Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tterm
+WorkingDirectory=/opt/tterm
+EnvironmentFile=/opt/tterm/.env
+ExecStart=/opt/tterm/venv/bin/python -m tterm.main
+Restart=always
+RestartSec=5
+
+# This process holds production access to other people's machines,
+# so it is confined as tightly as systemd allows
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tterm/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

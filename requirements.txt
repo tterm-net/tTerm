@@ -1,0 +1,19 @@
+# Core dependencies
+aiogram>=3.31,<4          # 3.31 is the first release with Bot API 10.3
+asyncssh>=2.24,<3
+fastapi>=0.141
+aiosqlite>=0.20
+websockets>=13
+
+# Tests only: FastAPI's TestClient needs an HTTP client
+httpx2>=0.28
+
+# uvicorn without [standard]: the extras pull in uvloop and httptools, which
+# we do not need and which build from source, breaking installs on recent
+# Python versions.
+uvicorn>=0.34
+
+# cryptography 49+ dropped wheels for Intel Macs, where pip would build from
+# source and fail without Rust. 48.0.1 is the last version that works there.
+# On Apple Silicon and Linux the pin does not apply and the latest is used.
+cryptography<49; platform_system == "Darwin" and platform_machine == "x86_64"
