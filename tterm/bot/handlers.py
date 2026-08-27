@@ -392,7 +392,9 @@ async def cb_how(call: CallbackQuery) -> None:
         f"Our CA public key is open: {config.PUBLIC_URL}/ca.pub\n"
         "Removing everything is one command — see the Remove button.\n\n"
         "⚠️ Traffic goes through Telegram servers and they can see its "
-        "contents. Do not print private keys or passwords into the chat.",
+        "contents. Do not print private keys or passwords into the chat.\n\n"
+        "Source code and how it is built: https://tterm.net\n"
+        "Updates: https://t.me/tTermBlog",
         parse_mode=ParseMode.HTML,
     )
 

@@ -1,6 +1,9 @@
 # tTerm
 
-A terminal for your servers, right inside a Telegram chat.
+**Terminal in Telegram with multi-user access.**
+
+[tterm.net](https://tterm.net) · [open the bot](https://t.me/tTermNetBot) ·
+[updates](https://t.me/tTermBlog) · [agent](https://github.com/tterm-net/tterm-agent)
 
 Type `ls -la` into the chat — the command runs on your machine and the reply
 comes back as a message with the exit code, the working directory and how long
@@ -77,6 +80,14 @@ tTerm is free. If it saves you time, you can support it — the link lives on
 
 Never take a wallet address from a fork or a mirror. The canonical one is
 published on the site only.
+
+## Links
+
+- [tterm.net](https://tterm.net) — the site, with release notes
+- [@tTermNetBot](https://t.me/tTermNetBot) — the bot itself
+- [@tTermBlog](https://t.me/tTermBlog) — updates and news
+- [tterm-agent](https://github.com/tterm-net/tterm-agent) — the agent for
+  computers
 
 ## License
 
