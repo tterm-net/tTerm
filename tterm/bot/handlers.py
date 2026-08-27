@@ -447,10 +447,12 @@ async def cb_add_windows(call: CallbackQuery) -> None:
          machines.para("Commands go to the Linux environment, not to Windows "
                        "itself — but your drives are visible there, and for "
                        "most tasks that is enough.")],
-        [[machines.link("What the script does", f"{config.PUBLIC_URL}/a/{agent_token}"),
-          machines.link("How to install WSL2",
-                        "https://learn.microsoft.com/windows/wsl/install")],
-         [machines.back()]],
+        [[machines.copy("Copy command", cmd),
+          machines.link("What the script does",
+                        f"{config.PUBLIC_URL}/a/{agent_token}")],
+         [machines.link("How to install WSL2",
+                        "https://learn.microsoft.com/windows/wsl/install"),
+          machines.back()]],
     )
     kb = InlineKeyboardBuilder()
     kb.button(text="How to install WSL2",
@@ -482,8 +484,9 @@ async def cb_add_server(call: CallbackQuery) -> None:
          machines.para(machines.italic(
              "Don't trust a one-liner? Open the script and read it, "
              "it is short."))],
-        [[machines.link("What the script does", f"{config.PUBLIC_URL}/s/{token}"),
-          machines.back()]],
+        [[machines.copy("Copy command", cmd),
+          machines.link("What the script does", f"{config.PUBLIC_URL}/s/{token}")],
+         [machines.back()]],
     )
     kb = InlineKeyboardBuilder()
     kb.button(text="What the script does", url=f"{config.PUBLIC_URL}/s/{token}")
@@ -526,10 +529,11 @@ async def cb_add_agent(call: CallbackQuery) -> None:
                        "The machine name fills in by itself."),
          machines.para(machines.italic("macOS and Linux. "
                                        "Windows is not supported yet."))],
-        [[machines.link("What the script does", f"{config.PUBLIC_URL}/a/{token}"),
-          machines.link("Agent source code",
-                        "https://github.com/tterm-net/tterm-agent")],
-         [machines.back()]],
+        [[machines.copy("Copy command", cmd),
+          machines.link("What the script does", f"{config.PUBLIC_URL}/a/{token}")],
+         [machines.link("Agent source code",
+                        "https://github.com/tterm-net/tterm-agent"),
+          machines.back()]],
     )
     kb = InlineKeyboardBuilder()
     kb.button(text="What the script does", url=f"{config.PUBLIC_URL}/a/{token}")
@@ -606,12 +610,22 @@ async def cb_confirm(call: CallbackQuery) -> None:
     await call.answer("Connected")
     if call.message is None:
         return
-    await call.message.edit_reply_markup(reply_markup=None)
-    await call.message.answer(
-        f"{SERVER_ICON} <b>{html.escape(host.name)}</b> is connected and active.\n\n"
-        "Just type commands into the chat, like in a terminal.\n"
-        "Try: <code>uptime</code>",
-        parse_mode=ParseMode.HTML,
+
+    # The question was sent as a rich message, so its buttons live inside the
+    # blocks rather than in reply_markup. Clearing reply_markup fails there and
+    # the reply below would never be sent, so the whole message is replaced.
+    await show_screen(
+        call.bot, call.message.chat.id,
+        machines.screen(
+            [machines.para(f"{SERVER_ICON} ", machines.bold(host.name),
+                           " is connected and active."),
+             machines.para("Just type commands into the chat, "
+                           "like in a terminal."),
+             machines.para("Try: ", machines.code("uptime"))],
+            [],
+        ),
+        call,
+        f"{SERVER_ICON} <b>{html.escape(host.name)}</b> is connected and active.",
     )
 
 
@@ -622,15 +636,21 @@ async def cb_reject(call: CallbackQuery) -> None:
     if host and call.from_user and host.owner_id == call.from_user.id:
         await db.reject_host(host_id)
     await call.answer("Rejected")
-    if call.message:
-        await call.message.edit_reply_markup(reply_markup=None)
-        await call.message.answer(
-            "The host was rejected and is not connected.\n\n"
-            "If you did not start this, someone may have sent you their own "
-            "install link. Check that there is no user named "
-            f"<code>{config.SSH_USER}</code>.",
-            parse_mode=ParseMode.HTML,
-        )
+    if call.message is None:
+        return
+    await show_screen(
+        call.bot, call.message.chat.id,
+        machines.screen(
+            [machines.para("The host was rejected and is not connected."),
+             machines.para("If you did not start this, someone may have sent "
+                           "you their own install link. Check that there is "
+                           "no user named ", machines.code(config.SSH_USER),
+                           " on that machine.")],
+            [],
+        ),
+        call,
+        "The host was rejected and is not connected.",
+    )
 
 
 # ------------------------------------------------------ picking a machine

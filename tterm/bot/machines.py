@@ -18,6 +18,7 @@ The command output card is not built here: it stayed a plain message.
 from __future__ import annotations
 
 from aiogram.types import (
+    CopyTextButton,
     DisabledButton,
     InputRichBlockButtons,
     InputRichBlockParagraph,
@@ -102,6 +103,16 @@ def italic(text: str) -> RichTextItalic:
 
 def link(text: str, url: str) -> RichMessageButton:
     return RichMessageButton(text=text, url=url)
+
+
+def copy(text: str, payload: str) -> RichMessageButton:
+    """A button that copies text to the clipboard.
+
+    Needed because a `pre` block inside a rich message has no copy affordance
+    of its own, unlike a `<pre>` in a plain message. Without this the install
+    command has to be retyped by hand.
+    """
+    return RichMessageButton(text=text, copy_text=CopyTextButton(text=payload))
 
 
 def back(to: str = "addhost") -> RichMessageButton:

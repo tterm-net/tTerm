@@ -950,6 +950,25 @@ async def test_machines_view() -> None:
                if _re4.search(r"[а-яА-Я]{3,}", ln) and not ln.lstrip().startswith("#")]
     check("the server installer is in English", not runtime, str(runtime[:2]))
 
+    # A rich message keeps its buttons inside the blocks, not in reply_markup.
+    # Clearing reply_markup there fails and the reply that follows is never
+    # sent — which is how server confirmation silently stopped working.
+    check("no reply_markup edits on rich messages",
+          "edit_reply_markup" not in handlers_all,
+          "replace the whole message via show_screen instead")
+
+    # A `pre` block inside a rich message has no copy affordance of its own,
+    # so the install command had to be retyped by hand.
+    check("install commands offer a copy button",
+          handlers_all.count("machines.copy(") == 3,
+          "one per install screen: server, computer, WSL2")
+
+    from tterm.bot import machines as _m
+    cmd = "curl -sSL https://example/s/tok | sudo sh"
+    btn = _m.copy("Copy command", cmd).model_dump(exclude_none=True, mode="json")
+    check("the copy button carries the exact command",
+          btn["copy_text"]["text"] == cmd, str(btn))
+
     check("the command card stayed a plain message",
           "card.text, parse_mode=ParseMode.HTML" in handlers_all,
           "the rich-block version was rejected")
