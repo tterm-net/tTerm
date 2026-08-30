@@ -97,6 +97,12 @@ ONLINE, OFFLINE = "●", "○"
 AGENT_UNINSTALL = "~/.tterm/uninstall.sh"
 
 
+#: Telegram refuses an edit that would change nothing. That is not a failure —
+#: the screen already shows what we wanted — but treating it as one made the
+#: bot fall back to the old keyboard whenever a machine was tapped twice.
+UNCHANGED = "message is not modified"
+
+
 async def show_screen(bot: Bot, chat_id: int, rich, call: CallbackQuery | None,
                       fallback_text: str = "", fallback_markup=None) -> None:
     """Shows a rich screen, as a new message or by editing the previous one.
@@ -112,7 +118,9 @@ async def show_screen(bot: Bot, chat_id: int, rich, call: CallbackQuery | None,
         else:
             await bot.send_rich_message(chat_id=chat_id, rich_message=rich)
         return
-    except TelegramBadRequest:
+    except TelegramBadRequest as exc:
+        if UNCHANGED in str(exc):
+            return
         log.warning("Rich screen was rejected, falling back to plain", exc_info=True)
     if not fallback_text:
         return
@@ -144,7 +152,9 @@ async def show_machines(bot: Bot, chat_id: int, user_id: int,
         else:
             await bot.send_rich_message(chat_id=chat_id, rich_message=rich)
         return
-    except TelegramBadRequest:
+    except TelegramBadRequest as exc:
+        if UNCHANGED in str(exc):
+            return
         log.warning("Could not show the list as a rich message, "
                     "falling back to plain", exc_info=True)
 
@@ -170,6 +180,12 @@ async def _replace(call: CallbackQuery, text: str, markup=None) -> None:
     try:
         await call.message.edit_text(text, parse_mode=ParseMode.HTML,
                                      reply_markup=markup)
+    except TelegramBadRequest as exc:
+        if UNCHANGED in str(exc):
+            return
+        log.debug("Edit failed, sending a new message instead", exc_info=True)
+        await call.message.answer(text, parse_mode=ParseMode.HTML,
+                                  reply_markup=markup)
     except Exception:
         log.debug("Edit failed, sending a new message instead", exc_info=True)
         await call.message.answer(text, parse_mode=ParseMode.HTML,

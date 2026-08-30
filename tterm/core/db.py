@@ -290,6 +290,45 @@ class Database:
         return Host.from_row(row) if row else None
 
     async def create_pending_host(self, owner_id: int, **kw: Any) -> int:
+        """Registers a server, reusing its record if it is already known.
+
+        The same machine gets re-enrolled often enough — a new CA after moving
+        the bot, a reinstall, a second look at the install command — and every
+        one of those used to add another row. Three identical `web-01` in the
+        list, only one of them reachable.
+
+        A server is identified by its address: the owner plus the IP and port.
+        The name can change, the address is what we connect to.
+        """
+        ip, port = kw.get("ip", ""), kw.get("ssh_port", 22)
+        if ip:
+            cur = await self.conn.execute(
+                """SELECT id FROM hosts
+                   WHERE owner_id = ? AND ip = ? AND ssh_port = ?
+                     AND kind = 'ssh' AND status != 'removed'
+                   ORDER BY id LIMIT 1""",
+                (owner_id, ip, port),
+            )
+            row = await cur.fetchone()
+            if row is not None:
+                await self.conn.execute(
+                    """UPDATE hosts SET name = ?, hostname = ?, ssh_user = ?,
+                              os_info = ?, host_pubkey = ?, status = 'pending',
+                              last_seen = ?
+                       WHERE id = ?""",
+                    (
+                        kw.get("name", "unnamed"),
+                        kw.get("hostname"),
+                        kw.get("ssh_user", config.SSH_USER),
+                        kw.get("os_info"),
+                        kw.get("host_pubkey"),
+                        now(),
+                        row["id"],
+                    ),
+                )
+                await self.conn.commit()
+                return int(row["id"])
+
         cur = await self.conn.execute(
             """INSERT INTO hosts (owner_id, name, hostname, ip, ssh_port, ssh_user,
                                   os_info, host_pubkey, status, last_seen, created_at)
@@ -298,8 +337,8 @@ class Database:
                 owner_id,
                 kw.get("name", "unnamed"),
                 kw.get("hostname"),
-                kw.get("ip", ""),
-                kw.get("ssh_port", 22),
+                ip,
+                port,
                 kw.get("ssh_user", config.SSH_USER),
                 kw.get("os_info"),
                 kw.get("host_pubkey"),
@@ -407,6 +446,20 @@ class Database:
                )"""
         )
         removed += cur.rowcount or 0
+
+        # Servers registered more than once, from before the address became
+        # the key. The newest row wins: it holds the certificate the machine
+        # currently trusts.
+        cur = await self.conn.execute(
+            """UPDATE hosts SET status = 'removed'
+               WHERE kind = 'ssh' AND status = 'active' AND ip != '' AND id NOT IN (
+                   SELECT MAX(id) FROM hosts
+                   WHERE kind = 'ssh' AND status = 'active' AND ip != ''
+                   GROUP BY owner_id, ip, ssh_port
+               )"""
+        )
+        removed += cur.rowcount or 0
+
         await self.conn.commit()
         return removed
 

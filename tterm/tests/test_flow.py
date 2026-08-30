@@ -905,11 +905,12 @@ async def test_machines_view() -> None:
     # Every screen must go through show_screen: it sends in-message buttons
     # and falls back to the plain layout only if Telegram refused them.
     import re as _re
-    # Two are allowed: the fallback inside show_screen and the command output
-    # card, which stays a plain message on purpose.
+    # Three are allowed: the two fallback branches inside _replace — one per
+    # exception type — and the command output card, which stays a plain
+    # message on purpose.
     answers = _re.findall(r"\.answer\([^)]*reply_markup=", handlers_all)
     check("menus and screens do not send the old keyboard directly",
-          len(answers) <= 2, str(answers[:4]))
+          len(answers) <= 3, str(answers[:4]))
     # HTML tags are not parsed inside rich blocks and show up as literal text.
     # Check that none are fed into machines.para anywhere.
     import re as _re2
@@ -953,6 +954,14 @@ async def test_machines_view() -> None:
     # A rich message keeps its buttons inside the blocks, not in reply_markup.
     # Clearing reply_markup there fails and the reply that follows is never
     # sent — which is how server confirmation silently stopped working.
+    # Telegram refuses an edit that changes nothing. Tapping the machine that
+    # is already active produced exactly that, and treating it as a failure
+    # made the bot fall back to the old keyboard in the middle of a session.
+    check("an unchanged screen is not treated as a failure",
+          'UNCHANGED = "message is not modified"' in handlers_all
+          and handlers_all.count("if UNCHANGED in str(exc)") >= 3,
+          "every edit path has to recognise it")
+
     check("no reply_markup edits on rich messages",
           "edit_reply_markup" not in handlers_all,
           "replace the whole message via show_screen instead")
