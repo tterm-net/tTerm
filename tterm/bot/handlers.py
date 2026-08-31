@@ -42,7 +42,7 @@ router = Router()
 
 BOT_COMMANDS = {
     "start", "help", "addhost", "hosts", "use", "log", "kill",
-    "reset", "share", "revoke", "cancel",
+    "reset", "share", "revoke", "donate", "cancel",
 }
 
 
@@ -95,6 +95,18 @@ ONLINE, OFFLINE = "●", "○"
 #: already thinking about disconnecting, always as its own block so it copies
 #: with a single tap.
 AGENT_UNINSTALL = "~/.tterm/uninstall.sh"
+
+#: Donation addresses, the same ones the site shows.
+#:
+#: This repository is public, so a fork can swap these for its own — fine for
+#: someone self-hosting, not fine for someone impersonating us. Hence the link
+#: to the site next to them: tterm.net/donate/ is the copy to check against.
+WALLETS = [
+    ("USDT · TRC-20", "TRON network only",
+     "TPv5SQVhjczDR3fBPvGKBu9Ekn8gcziQTX"),
+    ("USDT · ERC-20", "Ethereum network only",
+     "0xBc0B9cB860A6c789F7cB13DC59E6b5cf12Ab1fa0"),
+]
 
 
 #: Telegram refuses an edit that would change nothing. That is not a failure —
@@ -1102,6 +1114,39 @@ async def cb_log_all(call: CallbackQuery) -> None:
         parse_mode=ParseMode.HTML)
 
 
+@router.message(Command("donate"))
+async def cmd_donate(message: Message) -> None:
+    """Donation addresses, with a copy button for each.
+
+    A wallet address cannot reasonably be retyped on a phone, and the QR codes
+    live on the site — so the button is what makes this usable at all.
+    """
+    assert message.from_user is not None
+
+    blocks = [
+        machines.para(machines.bold("tTerm is free and will stay that way")),
+        machines.para("Donations go to hosting and further development."),
+    ]
+    rows = []
+    for title, network, address in WALLETS:
+        blocks.append(machines.para(machines.bold(title), " · ",
+                                    machines.italic(network)))
+        blocks.append({"type": "pre", "text": address})
+        rows.append([machines.copy(f"Copy {title.split(' · ')[1]}", address)])
+
+    blocks.append(machines.para(
+        machines.italic("Check these against tterm.net/donate/ — that is the "
+                        "canonical copy.")))
+    rows.append([machines.link("Open the site", "https://tterm.net/donate/")])
+
+    plain = "\n\n".join(
+        f"<b>{t_}</b> · <i>{n}</i>\n<pre>{html.escape(a)}</pre>"
+        for t_, n, a in WALLETS)
+    await show_screen(
+        message.bot, message.chat.id, machines.screen(blocks, rows), None,
+        f"<b>tTerm is free and will stay that way</b>\n\n{plain}")
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
@@ -1116,7 +1161,8 @@ async def cmd_help(message: Message) -> None:
         "/share — share a machine\n"
         "/revoke — revoke access\n"
         "/log — command history\n"
-        "/reset — reset a stuck session\n\n"
+        "/reset — reset a stuck session\n"
+        "/donate — support the project\n\n"
         "<b>Sharing</b>\n"
         "<code>/share #12 @john</code> — until revoked\n"
         "<code>/share #12 @john 4h</code> — for 4 hours\n"

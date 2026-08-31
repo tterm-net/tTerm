@@ -41,6 +41,7 @@ MENU = [
     BotCommand(command="revoke", description="Revoke access"),
     BotCommand(command="log", description="Command history"),
     BotCommand(command="reset", description="Reset a stuck session"),
+    BotCommand(command="donate", description="Support the project"),
     BotCommand(command="help", description="Help"),
 ]
 

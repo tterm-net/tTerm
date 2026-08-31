@@ -968,9 +968,31 @@ async def test_machines_view() -> None:
 
     # A `pre` block inside a rich message has no copy affordance of its own,
     # so the install command had to be retyped by hand.
+    # The same addresses live in the site repository. If the two copies ever
+    # disagree, somebody's money goes to the wrong place — so the test reads
+    # the site's generator and compares, when it is checked out alongside.
+    from tterm.bot.handlers import WALLETS
+    check("both networks are offered", len(WALLETS) == 2, str(len(WALLETS)))
+    check("addresses are not empty",
+          all(len(a) > 25 for _, _, a in WALLETS))
+    check("the network is named next to each address",
+          all("only" in n for _, n, _ in WALLETS),
+          "sending from the wrong network loses the money")
+
+    site_gen = (pathlib.Path(__file__).resolve().parents[2].parent
+                / "tterm-site" / "build_donate.py")
+    if site_gen.exists():
+        site_src = site_gen.read_text(encoding="utf-8")
+        missing = [a for _, _, a in WALLETS if a not in site_src]
+        check("bot and site show the same addresses", not missing, str(missing))
+    else:
+        print("  · tterm-site рядом не найден, сверка адресов пропущена")
+
+    # Three install screens plus the wallets on /donate: a long string nobody
+    # is going to retype needs a button next to it.
     check("install commands offer a copy button",
-          handlers_all.count("machines.copy(") == 3,
-          "one per install screen: server, computer, WSL2")
+          handlers_all.count("machines.copy(") == 4,
+          "three install screens and the donate wallets")
 
     from tterm.bot import machines as _m
     cmd = "curl -sSL https://example/s/tok | sudo sh"
