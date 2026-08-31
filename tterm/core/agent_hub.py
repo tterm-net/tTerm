@@ -22,7 +22,13 @@ from dataclasses import dataclass, field
 
 from .config import config
 from .formatter import BOOTSTRAP, parse_marker
-from .session_base import Block, ProgressCallback, TerminalSession
+from .session_base import (
+    IDLE_HINT_AFTER,
+    Block,
+    IdleCallback,
+    ProgressCallback,
+    TerminalSession,
+)
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +147,7 @@ class AgentSession(TerminalSession):
         self,
         command: str,
         on_progress: ProgressCallback | None = None,
+        on_idle: IdleCallback | None = None,
         timeout: int | None = None,
     ) -> Block:
         async with self._lock:
@@ -155,6 +162,7 @@ class AgentSession(TerminalSession):
                 None,
                 timeout=timeout or config.COMMAND_TIMEOUT_SECONDS,
                 on_progress=on_progress,
+                on_idle=on_idle,
                 block=block,
             )
             block.duration_ms = int((time.perf_counter() - started) * 1000)
@@ -174,6 +182,7 @@ class AgentSession(TerminalSession):
         command: str | None,
         timeout: float,
         on_progress: ProgressCallback | None = None,
+        on_idle: IdleCallback | None = None,
         block: Block | None = None,
     ):
         """Reads the agent stream up to the marker. Returns (output, state, code)."""
@@ -186,6 +195,7 @@ class AgentSession(TerminalSession):
         buf = ""
         deadline = time.monotonic() + timeout
         last_progress = 0.0
+        last_output = time.monotonic()
 
         while time.monotonic() < deadline:
             try:
@@ -209,6 +219,11 @@ class AgentSession(TerminalSession):
             if on_progress and buf and now - last_progress >= config.STREAM_EDIT_INTERVAL:
                 last_progress = now
                 await on_progress(buf)
+
+            # Same as over SSH: silence may mean a question, not work.
+            if on_idle and buf and now - last_output >= IDLE_HINT_AFTER:
+                last_output = now
+                await on_idle(buf)
         return None
 
     async def _drain(self, quiet: float = 0.7, limit: float = 10.0) -> None:

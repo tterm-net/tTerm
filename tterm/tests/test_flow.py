@@ -1040,6 +1040,81 @@ async def test_machines_view() -> None:
           "a single Remove button is enough")
 
 
+async def test_live_output() -> None:
+    """Streaming and spotting a command that is waiting for an answer."""
+    print("\nLive output")
+    from tterm.core.live import (DRAFT_INTERVAL, LiveOutput, is_yes_no,
+                                 looks_like_prompt)
+
+    # Questions, taken from what actually stalled us: git asking for a login.
+    asks = [
+        "Username for 'https://github.com': ",
+        "Password for https://x@github.com: ",
+        "Enter passphrase for key /root/.ssh/id_ed25519: ",
+        "[sudo] password for deploy: ",
+        "Do you want to continue? [Y/n] ",
+        "Remove packages? [y/N]",
+        "Are you sure you want to continue connecting (yes/no)? ",
+        "Press ENTER to continue",
+    ]
+    for line in asks:
+        check(f"a question is recognised: {line[:28]!r}",
+              looks_like_prompt(line) is not None, line)
+
+    # Ordinary output must not be mistaken for one: a false alarm interrupts
+    # a command that was doing fine.
+    quiet = [
+        "Reading package lists... Done\n",
+        "Get:1 http://archive.ubuntu.com noble InRelease",
+        "total 48",
+        "https://github.com/tterm-net",
+        "Cloning into '/opt/x'...",
+        "  Username: alice, role: admin",
+    ]
+    for line in quiet:
+        check(f"plain output is left alone: {line[:28]!r}",
+              looks_like_prompt(line) is None, line)
+
+    check("a finished line is never a question",
+          looks_like_prompt("Password: \n") is None,
+          "the program moved on, so it is not waiting")
+    check("a yes/no question is offered buttons",
+          is_yes_no("Continue? [Y/n]") and not is_yes_no("Password:"))
+
+    # The pause matters: output arrives in pieces, and a line that simply has
+    # not been finished yet would otherwise read as a question every time.
+    live = LiveOutput()
+    live.feed("Username for 'https://github.com': ")
+    check("a fresh line is not called a question yet",
+          live.pending_prompt() is None)
+    check("after the output settles, it is",
+          live.pending_prompt(now=live.last_change + 5) is not None)
+    live.announced = looks_like_prompt(live.text)
+    check("the same question is not announced twice",
+          live.pending_prompt(now=live.last_change + 6) is None)
+
+    from tterm.core.config import config as _cfg
+    check("the draft is refreshed several times a second",
+          DRAFT_INTERVAL < _cfg.STREAM_EDIT_INTERVAL,
+          "drafts are made for streaming, plain edits were not")
+
+    handlers = (pathlib.Path(__file__).resolve().parents[1]
+                / "bot" / "handlers.py").read_text("utf-8")
+    check("output streams into a draft", "send_message_draft" in handlers)
+    check("the draft carries a stop button", "can_stop=True" in handlers)
+    check("stopping the draft interrupts the command",
+          "stopped_message_generation" in handlers
+          and 'send_key(b"\\x03")' in handlers,
+          "otherwise Stop only hides the draft and the command runs on")
+    check("a yes/no answer is sent with a newline",
+          '"y": b"y\\n"' in handlers,
+          "without it the program waits with the letter already typed")
+
+    check("editing a message remains as a fallback",
+          "Draft refused, streaming into a message instead" in handlers,
+          "an older client should still see progress")
+
+
 async def test_shutdown() -> None:
     """Shutdown must not hang the process.
 
@@ -1160,6 +1235,7 @@ async def main() -> int:
     await test_agent()
     await test_sharing()
     await test_machines_view()
+    await test_live_output()
     await test_shutdown()
     await test_resilience()
     test_rendering()

@@ -19,11 +19,17 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ButtonStyle, ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    Message,
+    MessageGenerationStopped,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..core.config import config
 from ..core.db import Host, db
+from ..core.live import LiveOutput, YES_NO, is_yes_no
 from ..core.formatter import (
     PC_ICON,
     SERVER_ICON,
@@ -762,9 +768,9 @@ def human_duration(seconds: int) -> str:
 
 SHARE_HELP = (
     "<b>Share a machine</b>\n\n"
-    "⚠️ <b>They have to start the bot first.</b> Telegram does not let bots "
-    "look people up by username, so I only know those who have written to me. "
-    "Ask them to open the bot and press Start — then share.\n\n"
+    "<b>To give someone access, they have to start the bot first.</b> "
+    "Telegram does not let bots look users up by username, so I only know "
+    "those who have started me. Ask them to open the bot and press Start.\n\n"
     "<code>/share #12 @john</code> — until you revoke it\n"
     "<code>/share #12 @john 4h</code> — for 4 hours\n\n"
     "Duration: <code>30m</code>, <code>4h</code>, <code>7d</code>.\n"
@@ -1207,6 +1213,26 @@ async def cmd_help(message: Message) -> None:
 # ------------------------------------------------------------- interactive
 
 
+@router.stopped_message_generation()
+async def on_generation_stopped(event: MessageGenerationStopped) -> None:
+    """The Stop button on a streaming draft.
+
+    Telegram only tells us the draft was stopped; the command on the other end
+    keeps running unless we interrupt it. The draft id is the id of the message
+    that started it, which is how we find the session to send Ctrl+C to.
+    """
+    user_id = event.chat.id
+    host = await db.get_active_host(user_id)
+    if host is None:
+        return
+    session = sessions.peek(user_id, host.id)
+    if session is None or not session.is_alive:
+        return
+    await session.send_key(b"\x03")
+    log.info("Command interrupted from the draft: user=%s host=%s",
+             user_id, host.id)
+
+
 @router.callback_query(F.data.startswith("key:"))
 async def cb_key(call: CallbackQuery) -> None:
     """Key buttons for programs that took over the screen."""
@@ -1218,7 +1244,10 @@ async def cb_key(call: CallbackQuery) -> None:
         return
 
     payload = {"ctrl_c": b"\x03", "q": b"q", "enter": b"\r",
-               "up": b"\x1b[A", "down": b"\x1b[B"}
+               "up": b"\x1b[A", "down": b"\x1b[B",
+               # Answers to a question need the newline: without it the
+               # program keeps waiting with the letter already typed.
+               "y": b"y\n", "n": b"n\n"}
     await live.send_key(payload.get(key, b""))
     await call.answer("Sent")
 
@@ -1280,15 +1309,40 @@ async def run_command(message: Message, bot: Bot) -> None:
     last_rendered = ""
     running_state = State(host=host.name,
                           icon=PC_ICON if host.kind == "agent" else SERVER_ICON)
+    live = LiveOutput()
+    # One draft per command. The id only has to be unique within the chat while
+    # the draft is open, and the message id we are answering is exactly that.
+    draft_id = message.message_id
 
     async def on_progress(partial: str) -> None:
-        """For a long command we edit one message instead of spawning new ones."""
+        """Streams the output into a draft while the command is still running.
+
+        A draft is Telegram's own mechanism for text that arrives in pieces —
+        added for AI answers, and our case has the same shape. It carries its
+        own Stop button, which is how a stuck command gets interrupted.
+        """
         nonlocal placeholder, last_rendered
+        live.text = partial
+        live.last_change = time.monotonic()
+
         rendered = render_running(partial, time.perf_counter() - started,
                                   lang=detect_lang(text), state=running_state)
-        if rendered == last_rendered:
+        if rendered == last_rendered or not live.should_draw():
             return
         last_rendered = rendered
+        live.drawn()
+
+        try:
+            await bot.send_message_draft(
+                chat_id=message.chat.id, draft_id=draft_id, text=rendered,
+                parse_mode=ParseMode.HTML, can_stop=True)
+            return
+        except TelegramBadRequest:
+            # Older client, or drafts refused for this chat: fall back to the
+            # message we used to edit. Showing progress badly beats not at all.
+            log.debug("Draft refused, streaming into a message instead",
+                      exc_info=True)
+
         try:
             if placeholder is None:
                 placeholder = await message.answer(rendered, parse_mode=ParseMode.HTML)
@@ -1297,8 +1351,36 @@ async def run_command(message: Message, bot: Bot) -> None:
         except Exception:
             log.debug("Could not update the streaming message", exc_info=True)
 
+    async def on_idle(partial: str) -> None:
+        """Says so when the command appears to be waiting for an answer.
+
+        It is a guess, not a diagnosis: a program may print anything. So we
+        offer what we think is happening and let the person decide, rather
+        than interrupting the command ourselves.
+        """
+        live.text = partial
+        question = live.pending_prompt()
+        if question is None:
+            return
+        live.announced = question
+
+        kb = InlineKeyboardBuilder()
+        if is_yes_no(question):
+            for answer in YES_NO:
+                kb.button(text=answer, callback_data=f"key:{answer}\\n")
+        kb.button(text="Ctrl+C", callback_data="key:\\x03",
+                  style=ButtonStyle.DANGER)
+        kb.adjust(3)
+        await message.answer(
+            f"⌨️ <b>{html.escape(host.name)}</b> is waiting for an answer:\\n"
+            f"<pre>{html.escape(question)}</pre>"
+            "Type the answer as a message, or use the buttons.",
+            parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+
     try:
-        block = await sessions.execute(user_id, host, text, on_progress=on_progress)
+        block = await sessions.execute(user_id, host, text,
+                                       on_progress=on_progress,
+                                       on_idle=on_idle)
     except ConnectionError as exc:
         await message.answer(
             f"⚠️ {html.escape(str(exc))}\n\n"

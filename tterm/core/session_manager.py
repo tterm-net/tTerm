@@ -12,7 +12,7 @@ import logging
 from .config import config
 from .db import Host, db
 from .agent_hub import AgentSession
-from .session_base import Block, ProgressCallback, TerminalSession
+from .session_base import Block, IdleCallback, ProgressCallback, TerminalSession
 from .ssh_session import ShellSession
 
 log = logging.getLogger(__name__)
@@ -58,19 +58,22 @@ class SessionManager:
         host: Host,
         command: str,
         on_progress: ProgressCallback | None = None,
+        on_idle: IdleCallback | None = None,
     ) -> Block:
         """Runs a command and records it in the session log right away."""
         session = await self.get_or_create(user_id, host)
         key = (user_id, host.id)
 
         try:
-            block = await session.run(command, on_progress=on_progress)
+            block = await session.run(command, on_progress=on_progress,
+                                      on_idle=on_idle)
         except ConnectionError:
             # One reconnect attempt: the network blinked, the laptop woke up.
             log.warning("Session dropped, reconnecting: user=%s host=%s", user_id, host.id)
             await self.drop(user_id, host.id)
             session = await self.get_or_create(user_id, host)
-            block = await session.run(command, on_progress=on_progress)
+            block = await session.run(command, on_progress=on_progress,
+                                      on_idle=on_idle)
 
         await db.record_block(
             session_id=self._db_session_ids.get(key, 0),

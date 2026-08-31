@@ -28,13 +28,20 @@ import asyncssh
 
 from .ca import ca
 from .formatter import BOOTSTRAP, parse_marker
-from .session_base import Block, ProgressCallback, TerminalSession
+from .session_base import (
+    IDLE_HINT_AFTER,
+    Block,
+    IdleCallback,
+    ProgressCallback,
+    TerminalSession,
+)
 from .config import config
 from .db import Host
 
 # Sequences entering and leaving the alternate screen (htop, vim, less).
 ALT_SCREEN_ENTER = re.compile(rb"\x1b\[\?(?:1049|47|1047)h")
 ALT_SCREEN_EXIT = re.compile(rb"\x1b\[\?(?:1049|47|1047)l")
+
 
 class ShellSession(TerminalSession):
     """A live SSH connection to one host, with an interactive bash over a PTY."""
@@ -148,6 +155,7 @@ class ShellSession(TerminalSession):
         self,
         command: str,
         on_progress: ProgressCallback | None = None,
+        on_idle: IdleCallback | None = None,
         timeout: int | None = None,
     ) -> Block:
         """Runs a command and returns a finished block.
@@ -166,6 +174,7 @@ class ShellSession(TerminalSession):
             raw = await self._read_until_marker(
                 timeout=timeout or config.COMMAND_TIMEOUT_SECONDS,
                 on_progress=on_progress,
+                on_idle=on_idle,
                 block=block,
             )
 
@@ -181,6 +190,7 @@ class ShellSession(TerminalSession):
         self,
         timeout: int,
         on_progress: ProgressCallback | None = None,
+        on_idle: IdleCallback | None = None,
         block: Block | None = None,
     ) -> bytes:
         """Reads the stream up to the prompt marker and returns what came before."""
@@ -188,6 +198,7 @@ class ShellSession(TerminalSession):
         buf = bytearray()
         deadline = time.monotonic() + timeout
         last_progress = 0.0
+        last_output = time.monotonic()
 
         while True:
             remaining = deadline - time.monotonic()
@@ -208,6 +219,7 @@ class ShellSession(TerminalSession):
 
             if chunk:
                 buf.extend(chunk)
+                last_output = time.monotonic()
                 if ALT_SCREEN_ENTER.search(chunk):
                     self.in_alt_screen = True
                     if block:
@@ -233,6 +245,13 @@ class ShellSession(TerminalSession):
             if on_progress and buf and now - last_progress >= config.STREAM_EDIT_INTERVAL:
                 last_progress = now
                 await on_progress(_decode(bytes(buf)))
+
+            # Nothing new for a while: the command may be waiting for an
+            # answer rather than working. Hand the output over and let the
+            # bot decide — it can read a prompt, this loop cannot.
+            if on_idle and buf and now - last_output >= IDLE_HINT_AFTER:
+                last_output = now
+                await on_idle(_decode(bytes(buf)))
 
     # ------------------------------------------------------------------ control
 

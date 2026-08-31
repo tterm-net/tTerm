@@ -18,6 +18,17 @@ from typing import Awaitable, Callable
 
 from .formatter import State
 
+#: Silence longer than this is worth a second look: the command may be waiting
+#: for an answer rather than working. Deliberately generous — plenty of honest
+#: commands think for two seconds — and the check that follows is narrow, so
+#: a false alarm costs nothing but a glance.
+IDLE_HINT_AFTER = 3.0
+
+#: Called when the output has gone quiet for a while, so the bot can look at
+#: it and decide whether the command is waiting for an answer. Separate from
+#: on_progress because silence, not new output, is what makes it interesting.
+IdleCallback = Callable[[str], Awaitable[None]]
+
 #: Called as output arrives, used to stream long-running commands.
 ProgressCallback = Callable[[str], Awaitable[None]]
 
@@ -72,6 +83,7 @@ class TerminalSession(ABC):
         self,
         command: str,
         on_progress: ProgressCallback | None = None,
+        on_idle: IdleCallback | None = None,
         timeout: int | None = None,
     ) -> Block:
         """Runs a command and returns a finished block."""
