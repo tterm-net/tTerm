@@ -1199,6 +1199,7 @@ async def test_terminals() -> None:
     # access has to take all of them — records included. Leaving the records
     # open would list them as owning windows on a machine they cannot reach,
     # and hand those windows back if access ever returned.
+    from tterm.bot import machines
     from tterm.core.session_manager import sessions
 
     guest_host = await db.create_pending_host(uid, name="shared-01",
@@ -1238,6 +1239,44 @@ async def test_terminals() -> None:
     check("access granted again starts from a clean window",
           len(await db.terminals_of(other, guest_host)) == 1)
 
+    # Sharing is per machine, not per window: whichever line is selected, the
+    # owner sees the same people, and the recipient sees no management at all.
+    own_a = await db.ensure_terminal(uid, guest_host)
+    own_b = await db.open_terminal(uid, guest_host)
+    seen = []
+    for picked in (own_a, own_b):
+        drawn = await machines.build([await db.get_host(guest_host)],
+                                     await db.get_host(guest_host), uid,
+                                     {guest_host: True}, picked)
+        rows = [b["text"]
+                for blk in drawn.model_dump(exclude_none=True, mode="json")["blocks"]
+                if blk["type"] == "buttons" for b in blk["buttons"]]
+        seen.append([r for r in rows if r.startswith("Access")])
+    check("every line offers the same sharing", seen[0] == seen[1] == ["Access (1)"],
+          str(seen))
+
+    guest_view = await machines.build([await db.get_host(guest_host)],
+                                      await db.get_host(guest_host), other,
+                                      {guest_host: True},
+                                      int((await db.terminals_of(other, guest_host))[0]["id"]))
+    guest_rows = [b["text"]
+                  for blk in guest_view.model_dump(exclude_none=True, mode="json")["blocks"]
+                  if blk["type"] == "buttons" for b in blk["buttons"]]
+    check("a recipient gets no management buttons",
+          not any(r.startswith(("Access", "Remove")) for r in guest_rows),
+          str(guest_rows))
+    check("but can still open windows of their own", "+ Terminal" in guest_rows)
+
+    # Every one of their lines goes at once, not just the selected one.
+    for _ in range(2):
+        await db.open_terminal(other, guest_host)
+    await db.revoke(guest_host, other)
+    await sessions.drop_host(other, guest_host, forget=True)
+    gone = await machines.build(await db.list_hosts(other), None, other, {}, None)
+    check("all of a recipient's lines disappear together",
+          "web-01" not in gone.model_dump_json() and
+          "shared-01" not in gone.model_dump_json())
+
     manager_src = (pathlib.Path(__file__).resolve().parents[1]
                    / "core" / "session_manager.py").read_text("utf-8")
     check("expiry drops the terminals, not a stale key",
@@ -1247,6 +1286,22 @@ async def test_terminals() -> None:
                 / "bot" / "handlers.py").read_text("utf-8")
     check("there is a way to open another", "newterm:" in handlers)
     check("and to switch between them", '"term:' in handlers)
+
+    # Each terminal is a line of its own, the same shape as a machine: picking
+    # one is the same gesture either way.
+    import json as _tj
+
+    view_host = await db.get_host(hid)
+    extra = await db.open_terminal(uid, hid)
+    drawn = _tj.dumps((await machines.build(
+        [view_host], view_host, uid, {hid: True}, extra
+    )).model_dump(exclude_none=True, mode="json"), ensure_ascii=False)
+    check("the first line carries the plain machine name",
+          '"text": "web-01"' in drawn)
+    check("the others say which one they are",
+          '"web-01 (' in drawn,
+          "a number in brackets is what tells them apart")
+    await db.close_terminal(extra)
     check("and to close one", "closeterm:" in handlers)
     check("commands go to the selected terminal",
           "terminal_id=terminal_id" in handlers)

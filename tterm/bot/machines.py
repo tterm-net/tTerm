@@ -55,10 +55,16 @@ def _reachable(host: Host, online: bool) -> bool:
     return online if host.kind == "agent" else True
 
 
-def _name_button(host: Host, active: bool, online: bool) -> RichTextButton:
+def _name_button(host: Host, label: str, active: bool, online: bool,
+                 action: str) -> RichTextButton:
+    """The machine name as a small button inside the line.
+
+    `disabled` is passed as an object and only at creation: the model is
+    frozen, so it cannot be set afterwards.
+    """
     return RichTextButton(button=RichMessageButton(
-        text=host.name,
-        callback_data=f"use:{host.id}",
+        text=label,
+        callback_data=action,
         style="primary" if active else None,
         # An object, and only at creation time: the model is frozen.
         disabled=None if _reachable(host, online) else DisabledButton(),
@@ -126,7 +132,6 @@ async def build(hosts: list[Host], active: Host | None, user_id: int,
     blocks: list = [InputRichBlockParagraph(text=[RichTextBold(text=TITLE)])]
 
     for h in hosts:
-        is_active = bool(active and h.id == active.id)
         tail = h.ip or ("computer" if h.kind == "agent" else "—")
         if h.owner_id != user_id:
             owner = await db.username_of(h.owner_id) or "its owner"
@@ -134,54 +139,72 @@ async def build(hosts: list[Host], active: Host | None, user_id: int,
         elif not _reachable(h, online.get(h.id, False)):
             tail = "offline"
 
-        blocks.append(InputRichBlockParagraph(text=[
-            f"{_icon(h)} ", RichTextCode(text=f"#{h.id}"), " ",
-            _name_button(h, is_active, online.get(h.id, False)),
-            RichTextItalic(text=f"  {tail}"),
-        ]))
-
-        if not is_active:
+        # A machine can carry several terminals, the way you keep more than one
+        # window open on a server. Each gets its own line: switching to one is
+        # the same gesture as switching machines, so it should look the same.
+        terminals = await db.terminals_of(user_id, h.id)
+        if not terminals:
+            # Nobody has typed here yet. One line, and the first terminal is
+            # created the moment it is picked.
+            is_active = bool(active and h.id == active.id)
+            blocks.append(InputRichBlockParagraph(text=[
+                f"{_icon(h)} ", RichTextCode(text=f"#{h.id}"), " ",
+                _name_button(h, h.name, is_active,
+                             online.get(h.id, False), f"use:{h.id}"),
+                RichTextItalic(text=f"  {tail}"),
+            ]))
+            if is_active:
+                blocks.append(_actions(h, user_id, None, 1,
+                                       await db.shares_of(h.id)))
             continue
 
-        # A machine can carry several terminals, the way you keep more than one
-        # window open on a server. They show up only under the selected
-        # machine — listing everyone's windows all the time would bury the list.
-        terminals = await db.terminals_of(user_id, h.id)
-        if len(terminals) > 1:
-            # Numbered by position, so closing one in the middle renumbers the
-            # rest instead of leaving a gap. A named terminal keeps its name.
-            row = [
-                RichMessageButton(
-                    text=term["name"] or str(n),
-                    callback_data=f"term:{term['id']}",
-                    style="primary" if term["id"] == active_terminal else None,
-                )
-                for n, term in enumerate(terminals, start=1)
-            ]
-            blocks.append(InputRichBlockButtons(align="left", buttons=row))
-
-        actions = [RichMessageButton(text="+ Terminal",
-                                     callback_data=f"newterm:{h.id}")]
-        if len(terminals) > 1 and active_terminal:
-            actions.append(RichMessageButton(
-                text="Rename", callback_data=f"renameterm:{active_terminal}"))
-            actions.append(RichMessageButton(
-                text="Close", style="danger",
-                callback_data=f"closeterm:{active_terminal}"))
-
-        # The rest is management, and only the owner has any: someone granted
-        # access can work on the machine but not dispose of it.
-        if h.owner_id == user_id:
-            shares = await db.shares_of(h.id)
-            actions.append(RichMessageButton(
-                text=f"Access ({len(shares)})" if shares else "Access",
-                callback_data=f"shares:{h.id}"))
-            actions.append(RichMessageButton(text="Remove", style="danger",
-                                             callback_data=f"askrm:{h.id}"))
-        blocks.append(InputRichBlockButtons(align="left", buttons=actions))
+        for number, term in enumerate(terminals, start=1):
+            term_id = int(term["id"])
+            is_active = term_id == active_terminal
+            # The first window carries the machine's own name; the others say
+            # which one they are. That is the whole difference between them.
+            label = h.name if number == 1 and not term["name"] else (
+                f"{h.name} ({term['name'] or number})")
+            blocks.append(InputRichBlockParagraph(text=[
+                f"{_icon(h)} ", RichTextCode(text=f"#{h.id}"), " ",
+                _name_button(h, label, is_active, online.get(h.id, False),
+                             f"term:{term_id}"),
+                RichTextItalic(text=f"  {tail}" if number == 1 else ""),
+            ]))
+            if is_active:
+                blocks.append(_actions(h, user_id, term_id, len(terminals),
+                                       await db.shares_of(h.id)))
 
     blocks.append(InputRichBlockButtons(align="left", buttons=[
         RichMessageButton(text=ADD_LABEL, callback_data="addhost",
                           style="success"),
     ]))
     return InputRichMessage(blocks=blocks)
+
+
+def _actions(host: Host, user_id: int, terminal_id: int | None,
+             total: int, shares: list) -> InputRichBlockButtons:
+    """Buttons under the selected line.
+
+    Closing is offered only when there is somewhere left to go: the last
+    terminal is the machine itself, and Remove is the button for that.
+    """
+    buttons = [RichMessageButton(text="+ Terminal",
+                                 callback_data=f"newterm:{host.id}")]
+    if terminal_id is not None:
+        buttons.append(RichMessageButton(
+            text="Rename", callback_data=f"renameterm:{terminal_id}"))
+        if total > 1:
+            buttons.append(RichMessageButton(
+                text="Close", style="danger",
+                callback_data=f"closeterm:{terminal_id}"))
+
+    # The rest is management, and only the owner has any: someone granted
+    # access can work on the machine but not dispose of it.
+    if host.owner_id == user_id:
+        buttons.append(RichMessageButton(
+            text=f"Access ({len(shares)})" if shares else "Access",
+            callback_data=f"shares:{host.id}"))
+        buttons.append(RichMessageButton(text="Remove", style="danger",
+                                         callback_data=f"askrm:{host.id}"))
+    return InputRichBlockButtons(align="left", buttons=buttons)
