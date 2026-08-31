@@ -762,12 +762,13 @@ def human_duration(seconds: int) -> str:
 
 SHARE_HELP = (
     "<b>Share a machine</b>\n\n"
+    "⚠️ <b>They have to start the bot first.</b> Telegram does not let bots "
+    "look people up by username, so I only know those who have written to me. "
+    "Ask them to open the bot and press Start — then share.\n\n"
     "<code>/share #12 @john</code> — until you revoke it\n"
     "<code>/share #12 @john 4h</code> — for 4 hours\n\n"
     "Duration: <code>30m</code>, <code>4h</code>, <code>7d</code>.\n"
     "The machine number is shown in <code>/use</code>.\n\n"
-    "<i>They must start the bot themselves first — otherwise I have no way "
-    "to tell who is behind the username.</i>\n\n"
     "Revoke: <code>/revoke #12 @john</code>"
 )
 
@@ -822,12 +823,28 @@ async def cmd_share(message: Message, command: CommandObject) -> None:
 
     grantee = await db.find_user_by_username(username)
     if grantee is None:
-        await message.answer(
-            f"I do not know who <b>{html.escape(username)}</b> is.\n\n"
-            "Telegram does not let bots look people up by username — I only "
-            "know those who started the bot themselves. Ask them to open "
-            f"@{(await _bot_username(message.bot))} and press Start.",
-            parse_mode=ParseMode.HTML)
+        # Not an error on the owner's part: there is simply no way for a bot
+        # to resolve a username it has never seen. Say what to do about it,
+        # and hand over a message that can be forwarded as is.
+        bot_name = await _bot_username(message.bot)
+        invite = (f"Open https://t.me/{bot_name} and press Start — "
+                  "then I can give you access to a machine.")
+        await show_screen(
+            message.bot, message.chat.id,
+            machines.screen(
+                [machines.para(machines.bold(
+                    f"{username} has not started the bot yet")),
+                 machines.para(
+                     "Telegram does not let bots look people up by username. "
+                     "I only know who someone is once they have written to me."),
+                 machines.para(" "),
+                 machines.para("Send them this, then run the command again:"),
+                 {"type": "pre", "text": invite}],
+                [[machines.copy("Copy invite", invite)]],
+            ),
+            None,
+            f"<b>{html.escape(username)}</b> has not started the bot yet.\n\n"
+            f"<pre>{html.escape(invite)}</pre>")
         return
     if grantee == user_id:
         await message.answer("This is your own machine, you already have access.")
@@ -875,7 +892,16 @@ async def cmd_revoke(message: Message, command: CommandObject) -> None:
         return
 
     grantee = await db.find_user_by_username(username)
-    if grantee is None or not await db.revoke(host_id, grantee):
+    if grantee is None:
+        # Different from "had no access": we do not know this person at all,
+        # so the owner is probably looking at a typo in the username.
+        await message.answer(
+            f"I have never seen <b>{html.escape(username)}</b>, so there is "
+            "nothing to revoke. Check the username in <code>/use</code> — "
+            "it lists who each machine is shared with.",
+            parse_mode=ParseMode.HTML)
+        return
+    if not await db.revoke(host_id, grantee):
         await message.answer(
             f"<b>{html.escape(username)}</b> had no access to "
             f"<code>#{host_id}</code> anyway.", parse_mode=ParseMode.HTML)
@@ -1126,6 +1152,9 @@ async def cmd_donate(message: Message) -> None:
     blocks = [
         machines.para(machines.bold("tTerm is free and will stay that way")),
         machines.para("Donations go to hosting and further development."),
+        # A blank line before the wallets: the intro and the addresses are
+        # different kinds of thing and should not read as one block.
+        machines.para(" "),
     ]
     rows = []
     for title, network, address in WALLETS:
@@ -1158,11 +1187,11 @@ async def cmd_help(message: Message) -> None:
         "<b>Commands</b>\n"
         "/addhost — connect a machine\n"
         "/use — your machines\n"
+        "/donate — support the project\n"
         "/share — share a machine\n"
         "/revoke — revoke access\n"
         "/log — command history\n"
-        "/reset — reset a stuck session\n"
-        "/donate — support the project\n\n"
+        "/reset — reset a stuck session\n\n"
         "<b>Sharing</b>\n"
         "<code>/share #12 @john</code> — until revoked\n"
         "<code>/share #12 @john 4h</code> — for 4 hours\n"

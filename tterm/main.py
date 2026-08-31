@@ -37,11 +37,11 @@ log = logging.getLogger("tterm")
 MENU = [
     BotCommand(command="addhost", description="Connect a machine"),
     BotCommand(command="use", description="Your machines"),
+    BotCommand(command="donate", description="Support the project"),
     BotCommand(command="share", description="Share a machine"),
     BotCommand(command="revoke", description="Revoke access"),
     BotCommand(command="log", description="Command history"),
     BotCommand(command="reset", description="Reset a stuck session"),
-    BotCommand(command="donate", description="Support the project"),
     BotCommand(command="help", description="Help"),
 ]
 

@@ -731,6 +731,19 @@ async def test_sharing() -> None:
           "_not_owner" in handlers_src,
           "otherwise they could uninstall the agent or remove the machine")
 
+    # The limitation has to be stated before the command is typed, not after
+    # it fails. A bot cannot resolve a username it has never seen, and finding
+    # that out through a refusal reads as a broken feature.
+    check("the share help leads with the requirement",
+          "have to start the bot first" in handlers_src
+          and handlers_src.index("have to start the bot first")
+              < handlers_src.index("Duration:"),
+          "it used to sit at the bottom as a footnote")
+    check("an unknown username gets a forwardable invite",
+          "Copy invite" in handlers_src)
+    check("revoke tells an unknown name from one without access",
+          "nothing to revoke" in handlers_src)
+
     # The owner has to see other people's commands on their machine, or
     # sharing access would be reckless.
     await db.grant(hid, owner, john)
@@ -990,9 +1003,11 @@ async def test_machines_view() -> None:
 
     # Three install screens plus the wallets on /donate: a long string nobody
     # is going to retype needs a button next to it.
-    check("install commands offer a copy button",
-          handlers_all.count("machines.copy(") == 4,
-          "three install screens and the donate wallets")
+    # Three install screens, the donate wallets, and the invite handed over
+    # when a username is unknown: anything long enough to mistype gets a button.
+    check("long strings come with a copy button",
+          handlers_all.count("machines.copy(") == 5,
+          "three install screens, donate wallets, share invite")
 
     from tterm.bot import machines as _m
     cmd = "curl -sSL https://example/s/tok | sudo sh"
