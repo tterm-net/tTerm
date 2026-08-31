@@ -66,6 +66,23 @@ CREATE TABLE IF NOT EXISTS shares (
 CREATE INDEX IF NOT EXISTS idx_shares_grantee ON shares(grantee_id);
 CREATE INDEX IF NOT EXISTS idx_shares_host ON shares(host_id);
 
+-- A machine can carry more than one terminal, the way you keep several
+-- windows open on the same server: one running a log, another doing work.
+--
+-- Terminals belong to a person, not to the machine. Someone the machine is
+-- shared with opens their own, and never sees anyone else's.
+CREATE TABLE IF NOT EXISTS terminals (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id    INTEGER NOT NULL,
+    owner_id   INTEGER NOT NULL,
+    name       TEXT,
+    created_at INTEGER NOT NULL,
+    closed_at  INTEGER,
+    FOREIGN KEY (host_id) REFERENCES hosts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_terminals_owner
+    ON terminals(owner_id, host_id);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL,
@@ -169,6 +186,8 @@ class Database:
         wanted: dict[str, list[tuple[str, str]]] = {
             "hosts": [("kind", "TEXT NOT NULL DEFAULT 'ssh'"),
                       ("agent_token", "TEXT")],
+            "users": [("active_terminal_id", "INTEGER")],
+            "blocks": [("terminal_id", "INTEGER")],
         }
         for table, columns in wanted.items():
             cur = await self.conn.execute(f"PRAGMA table_info({table})")
@@ -552,6 +571,91 @@ class Database:
 
     # ---------- sessions & recording ----------
 
+    # ---------- terminals ----------
+
+    async def terminals_of(self, owner_id: int, host_id: int) -> list[aiosqlite.Row]:
+        cur = await self.conn.execute(
+            """SELECT * FROM terminals
+               WHERE owner_id = ? AND host_id = ? AND closed_at IS NULL
+               ORDER BY id""",
+            (owner_id, host_id),
+        )
+        return list(await cur.fetchall())
+
+    async def terminals_of_user(self, owner_id: int) -> list[aiosqlite.Row]:
+        cur = await self.conn.execute(
+            "SELECT * FROM terminals WHERE owner_id = ? AND closed_at IS NULL",
+            (owner_id,),
+        )
+        return list(await cur.fetchall())
+
+    async def open_terminal(self, owner_id: int, host_id: int,
+                            name: str | None = None) -> int:
+        """Opens another terminal on a machine.
+
+        An unnamed terminal has no name stored at all — the list numbers them
+        by position instead. Baking a number into the row means the numbers go
+        wrong the moment one in the middle is closed.
+        """
+        cur = await self.conn.execute(
+            """INSERT INTO terminals (host_id, owner_id, name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (host_id, owner_id, name, now()),
+        )
+        await self.conn.commit()
+        return cur.lastrowid or 0
+
+    async def get_terminal(self, terminal_id: int) -> aiosqlite.Row | None:
+        cur = await self.conn.execute(
+            "SELECT * FROM terminals WHERE id = ? AND closed_at IS NULL",
+            (terminal_id,),
+        )
+        return await cur.fetchone()
+
+    async def rename_terminal(self, terminal_id: int, name: str | None) -> None:
+        await self.conn.execute(
+            "UPDATE terminals SET name = ? WHERE id = ?", (name, terminal_id)
+        )
+        await self.conn.commit()
+
+    async def close_terminal(self, terminal_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE terminals SET closed_at = ? WHERE id = ?", (now(), terminal_id)
+        )
+        await self.conn.commit()
+
+    async def ensure_terminal(self, owner_id: int, host_id: int) -> int:
+        """The first terminal on a machine is implied — nobody asks for it."""
+        existing = await self.terminals_of(owner_id, host_id)
+        if existing:
+            return int(existing[0]["id"])
+        return await self.open_terminal(owner_id, host_id)
+
+    async def set_active_terminal(self, tg_user_id: int,
+                                  terminal_id: int | None) -> None:
+        await self.conn.execute(
+            "UPDATE users SET active_terminal_id = ? WHERE tg_user_id = ?",
+            (terminal_id, tg_user_id),
+        )
+        await self.conn.commit()
+
+    async def get_active_terminal(self, tg_user_id: int) -> aiosqlite.Row | None:
+        """The terminal commands currently go to, if it is still usable."""
+        cur = await self.conn.execute(
+            """SELECT t.* FROM terminals t
+               JOIN users u ON u.active_terminal_id = t.id
+               WHERE u.tg_user_id = ? AND t.closed_at IS NULL""",
+            (tg_user_id,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        # The machine may have been removed or the share revoked since.
+        if not await self.can_use(tg_user_id, int(row["host_id"])):
+            await self.set_active_terminal(tg_user_id, None)
+            return None
+        return row
+
     # ---------- shares ----------
 
     async def grant(self, host_id: int, owner_id: int, grantee_id: int,
@@ -667,11 +771,13 @@ class Database:
         cwd: str | None,
         duration_ms: int,
         truncated: bool = False,
+        terminal_id: int | None = None,
     ) -> int:
         cur = await self.conn.execute(
-            """INSERT INTO blocks (session_id, user_id, host_id, command, output, exit_code,
-                                   cwd, duration_ms, truncated, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO blocks (session_id, user_id, host_id, command, output,
+                                   exit_code, cwd, duration_ms, truncated,
+                                   terminal_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 user_id,
@@ -682,6 +788,7 @@ class Database:
                 cwd,
                 duration_ms,
                 1 if truncated else 0,
+                terminal_id or None,
                 now(),
             ),
         )

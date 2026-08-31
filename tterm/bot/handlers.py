@@ -159,8 +159,15 @@ async def show_machines(bot: Bot, chat_id: int, user_id: int,
     """
     hosts = await db.list_hosts(user_id)
     active = await db.get_active_host(user_id)
-    online = {h.id: _is_online(user_id, h) for h in hosts}
-    rich = await machines.build(hosts, active, user_id, online)
+    # Every terminal of this person, so a machine counts as online when any
+    # of its windows is alive.
+    mine: dict[int, set[int]] = {}
+    for row in await db.terminals_of_user(user_id):
+        mine.setdefault(int(row["host_id"]), set()).add(int(row["id"]))
+    online = {h.id: _is_online(user_id, h, mine.get(h.id)) for h in hosts}
+    term = await db.get_active_terminal(user_id)
+    rich = await machines.build(hosts, active, user_id, online,
+                                int(term["id"]) if term else None)
 
     try:
         if call is not None and call.message is not None:
@@ -210,16 +217,23 @@ async def _replace(call: CallbackQuery, text: str, markup=None) -> None:
                                   reply_markup=markup)
 
 
-def _is_online(user_id: int, host: Host) -> bool:
+def _is_online(user_id: int, host: Host, terminal_ids: set[int] | None = None) -> bool:
     """Whether the machine is online.
 
     For a server that means an open SSH session; for a computer, a connected
     agent — it holds the link itself even when nobody is sending commands.
+
+    A machine may carry several terminals, and any one of them being alive
+    makes it online.
     """
     if host.kind == "agent":
         return agents.get(host.id) is not None
-    live = sessions.peek(user_id, host.id)
-    return bool(live and live.is_alive)
+    if not terminal_ids:
+        return False
+    return any(
+        (live := sessions.peek(tid)) is not None and live.is_alive
+        for tid in terminal_ids
+    )
 
 
 def _share_label(share) -> str:
@@ -238,7 +252,7 @@ async def _servers_text(hosts: list[Host], active: Host | None, user_id: int) ->
     """The machine list with numbers: /share takes a number."""
     lines = ["<b>Your machines</b>", ""]
     for h in hosts:
-        dot = ONLINE if _is_online(user_id, h) else OFFLINE
+        dot = ONLINE if _is_online(user_id, h, None) else OFFLINE
         icon = PC_ICON if h.kind == "agent" else SERVER_ICON
         name = html.escape(h.name)
         name = f"<b>{name}</b>" if active and h.id == active.id else name
@@ -324,6 +338,151 @@ async def _shares_view(host: Host):
     return rich, fallback, kb.as_markup()
 
 
+#: Who is in the middle of naming a terminal: user id -> (terminal, deadline).
+#: A plain dict rather than a state machine — one short-lived question does not
+#: justify the machinery, and it clears itself either way.
+_RENAMING: dict[int, tuple[int, float]] = {}
+
+#: How long the bot keeps waiting for a name before the next message is
+#: treated as a command again.
+RENAME_WINDOW = 120.0
+
+
+@router.callback_query(F.data.startswith("renameterm:"))
+async def cb_rename_terminal(call: CallbackQuery) -> None:
+    """Asks for a new name; the next message becomes it."""
+    term_id = int(call.data.split(":")[1])  # type: ignore[union-attr]
+    if call.from_user is None:
+        return
+    term = await db.get_terminal(term_id)
+    if term is None or term["owner_id"] != call.from_user.id:
+        await call.answer("Terminal not found", show_alert=True)
+        return
+
+    _RENAMING[call.from_user.id] = (term_id, time.monotonic() + RENAME_WINDOW)
+    await call.answer()
+    if call.message is None:
+        return
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Cancel", callback_data="renamecancel")
+    await call.message.answer(
+        "Send the new name for this terminal.\n"
+        "<i>Your next message is taken as the name, not as a command.</i>",
+        parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+
+
+async def _apply_rename(message: Message, user_id: int, term_id: int,
+                        name: str) -> None:
+    """Stores the new name, or clears it back to a number."""
+    term = await db.get_terminal(term_id)
+    if term is None or term["owner_id"] != user_id:
+        await message.answer("That terminal is gone.")
+        return
+
+    clean = name.strip()[:24]
+    if clean.lower() in ("-", "reset", "default"):
+        clean = ""          # back to being numbered by position
+    await db.rename_terminal(term_id, clean or None)
+
+    host = await db.get_host(int(term["host_id"]))
+    await show_machines(message.bot, message.chat.id, user_id)
+    if host is not None:
+        label = clean or "its number"
+        await message.answer(f"Terminal renamed to <b>{html.escape(label)}</b>."
+                             if clean else "Terminal is back to its number.",
+                             parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data == "renamecancel")
+async def cb_rename_cancel(call: CallbackQuery) -> None:
+    if call.from_user is not None:
+        _RENAMING.pop(call.from_user.id, None)
+    await call.answer("Cancelled")
+    if call.message is not None:
+        await _replace(call, "Renaming cancelled.")
+
+
+@router.callback_query(F.data.startswith("newterm:"))
+async def cb_new_terminal(call: CallbackQuery) -> None:
+    """Opens another terminal on the same machine.
+
+    The point is the same as a second window on a server: one tailing a log,
+    another doing work. The sessions are separate, so a `cd` in one leaves the
+    other where it was.
+    """
+    host_id = int(call.data.split(":")[1])  # type: ignore[union-attr]
+    if call.from_user is None or not await db.can_use(call.from_user.id, host_id):
+        await call.answer("Machine unavailable", show_alert=True)
+        return
+
+    await db.ensure_terminal(call.from_user.id, host_id)
+    term_id = await db.open_terminal(call.from_user.id, host_id)
+    await db.set_active_terminal(call.from_user.id, term_id)
+    await db.set_active_host(call.from_user.id, host_id)
+    await call.answer("Terminal opened")
+
+    if call.message is None:
+        return
+    await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
+    host = await db.get_host(host_id)
+    if host is not None:
+        await send_prompt(call.bot, call.message.chat.id, call.from_user.id,
+                          host, term_id)
+
+
+@router.callback_query(F.data.startswith("term:"))
+async def cb_pick_terminal(call: CallbackQuery) -> None:
+    """Switches between the terminals of one machine."""
+    term_id = int(call.data.split(":")[1])  # type: ignore[union-attr]
+    if call.from_user is None:
+        return
+    term = await db.get_terminal(term_id)
+    if term is None or term["owner_id"] != call.from_user.id:
+        await call.answer("Terminal not found", show_alert=True)
+        return
+
+    await db.set_active_terminal(call.from_user.id, term_id)
+    await db.set_active_host(call.from_user.id, int(term["host_id"]))
+    await call.answer(term["name"] or "(1)")
+
+    if call.message is None:
+        return
+    await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
+    host = await db.get_host(int(term["host_id"]))
+    if host is not None:
+        await send_prompt(call.bot, call.message.chat.id, call.from_user.id,
+                          host, term_id)
+
+
+@router.callback_query(F.data.startswith("closeterm:"))
+async def cb_close_terminal(call: CallbackQuery) -> None:
+    """Closes one terminal, leaving the machine and the others alone."""
+    term_id = int(call.data.split(":")[1])  # type: ignore[union-attr]
+    if call.from_user is None:
+        return
+    term = await db.get_terminal(term_id)
+    if term is None or term["owner_id"] != call.from_user.id:
+        await call.answer("Terminal not found", show_alert=True)
+        return
+
+    host_id = int(term["host_id"])
+    others = [r for r in await db.terminals_of(call.from_user.id, host_id)
+              if r["id"] != term_id]
+    if not others:
+        # The last one is the machine itself; closing it would leave nowhere
+        # to type. Use Remove for that, it asks first.
+        await call.answer("This is the only terminal", show_alert=True)
+        return
+
+    await sessions.drop(term_id)
+    await db.close_terminal(term_id)
+    await db.set_active_terminal(call.from_user.id, int(others[0]["id"]))
+    await call.answer("Terminal closed")
+    if call.message is not None:
+        await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
+
+
 @router.callback_query(F.data.startswith("shares:"))
 async def cb_shares(call: CallbackQuery) -> None:
     """Who the machine is shared with, one revoke button per person.
@@ -353,7 +512,7 @@ async def cb_unshare(call: CallbackQuery) -> None:
         return
 
     await db.revoke(host_id, grantee)
-    await sessions.drop(grantee, host_id)
+    await sessions.drop_host(grantee, host_id, forget=True)
     who = await db.username_of(grantee) or "the user"
     await call.answer(f"Access for {who} revoked")
     try:
@@ -698,7 +857,8 @@ async def cmd_use(message: Message) -> None:
     await show_machines(message.bot, message.chat.id, message.from_user.id)
 
 
-async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host) -> None:
+async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host,
+                      terminal_id: int | None = None) -> None:
     """Sends the prompt for a machine.
 
     Without it there is no telling which directory we landed in, whether it is
@@ -707,7 +867,10 @@ async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host) -> None:
     """
     icon = PC_ICON if host.kind == "agent" else SERVER_ICON
     try:
-        block = await sessions.execute(user_id, host, "true")
+        if terminal_id is None:
+            terminal_id = await db.ensure_terminal(user_id, host.id)
+        block = await sessions.execute(user_id, host, "true",
+                                       terminal_id=terminal_id)
     except Exception as exc:
         await bot.send_message(
             chat_id,
@@ -913,7 +1076,7 @@ async def cmd_revoke(message: Message, command: CommandObject) -> None:
             f"<code>#{host_id}</code> anyway.", parse_mode=ParseMode.HTML)
         return
 
-    await sessions.drop(grantee, host_id)
+    await sessions.drop_host(grantee, host_id, forget=True)
     await message.answer(
         f"🛑 Access for <b>{html.escape(username)}</b> to "
         f"<b>{html.escape(host.name)}</b> is revoked. The session was cut.",
@@ -984,7 +1147,8 @@ async def cmd_disconnect(message: Message) -> None:
     if host is None:
         await message.answer("No active machine selected.")
         return
-    closed = await sessions.drop(message.from_user.id, host.id)
+    term = await db.get_active_terminal(message.from_user.id)
+    closed = await sessions.drop(int(term["id"])) if term else False
     text = [f"🛑 The session on <b>{html.escape(host.name)}</b> "
             + ("was closed." if closed else "was not open.")]
     if host.kind == "agent":
@@ -1051,7 +1215,7 @@ async def cb_remove(call: CallbackQuery) -> None:
         await call.answer("Machine not found", show_alert=True)
         return
     await call.answer("Removed")
-    await sessions.drop(call.from_user.id, host_id)
+    await sessions.drop_host(call.from_user.id, host_id)
     if host.kind == "agent":
         await db.revoke_agent_token(host_id)
     await db.remove_host(host_id)
@@ -1071,7 +1235,7 @@ async def cb_reset(call: CallbackQuery) -> None:
     if call.from_user is None or not await db.can_use(call.from_user.id, host_id):
         await call.answer("Machine unavailable", show_alert=True)
         return
-    closed = await sessions.drop(call.from_user.id, host_id)
+    closed = bool(await sessions.drop_host(call.from_user.id, host_id))
     await call.answer("Session reset" if closed else "No session was open")
 
 
@@ -1225,7 +1389,8 @@ async def on_generation_stopped(event: MessageGenerationStopped) -> None:
     host = await db.get_active_host(user_id)
     if host is None:
         return
-    session = sessions.peek(user_id, host.id)
+    term = await db.get_active_terminal(user_id)
+    session = sessions.peek(int(term["id"])) if term else None
     if session is None or not session.is_alive:
         return
     await session.send_key(b"\x03")
@@ -1238,7 +1403,8 @@ async def cb_key(call: CallbackQuery) -> None:
     """Key buttons for programs that took over the screen."""
     assert call.data is not None and call.from_user is not None
     _, host_id_s, key = call.data.split(":", 2)
-    live = sessions.peek(call.from_user.id, int(host_id_s))
+    term = await db.get_active_terminal(call.from_user.id)
+    live = sessions.peek(int(term["id"])) if term else None
     if live is None or not live.is_alive:
         await call.answer("The session is already closed", show_alert=True)
         return
@@ -1285,6 +1451,17 @@ async def run_command(message: Message, bot: Bot) -> None:
         return
 
     user_id = message.from_user.id
+
+    # A pending rename claims this message. The window is short and the prompt
+    # says so plainly, because a name swallowing a command would be worse than
+    # a command swallowing a name.
+    pending = _RENAMING.get(user_id)
+    if pending is not None:
+        term_id, deadline = pending
+        _RENAMING.pop(user_id, None)
+        if time.monotonic() <= deadline:
+            await _apply_rename(message, user_id, term_id, text)
+            return
     host = await db.get_active_host(user_id)
     if host is None:
         hosts = await db.list_hosts(user_id)
@@ -1322,8 +1499,12 @@ async def run_command(message: Message, bot: Bot) -> None:
         own Stop button, which is how a stuck command gets interrupted.
         """
         nonlocal placeholder, last_rendered
-        live.text = partial
-        live.last_change = time.monotonic()
+        # feed() moves the "last changed" mark only when the text really
+        # changed. Stamping it on every call — and on_progress fires on a
+        # timer, not on new output — meant the output never looked quiet,
+        # so a command waiting for an answer was never noticed.
+        live.feed(partial[len(live.text):] if partial.startswith(live.text)
+                  else partial)
 
         rendered = render_running(partial, time.perf_counter() - started,
                                   lang=detect_lang(text), state=running_state)
@@ -1358,7 +1539,8 @@ async def run_command(message: Message, bot: Bot) -> None:
         offer what we think is happening and let the person decide, rather
         than interrupting the command ourselves.
         """
-        live.text = partial
+        # Read-only here: the mark belongs to on_progress, and moving it
+        # would reset the very silence we are measuring.
         question = live.pending_prompt()
         if question is None:
             return
@@ -1367,8 +1549,8 @@ async def run_command(message: Message, bot: Bot) -> None:
         kb = InlineKeyboardBuilder()
         if is_yes_no(question):
             for answer in YES_NO:
-                kb.button(text=answer, callback_data=f"key:{answer}\\n")
-        kb.button(text="Ctrl+C", callback_data="key:\\x03",
+                kb.button(text=answer, callback_data=f"key:{host.id}:{answer}")
+        kb.button(text="Ctrl+C", callback_data=f"key:{host.id}:ctrl_c",
                   style=ButtonStyle.DANGER)
         kb.adjust(3)
         await message.answer(
@@ -1377,8 +1559,19 @@ async def run_command(message: Message, bot: Bot) -> None:
             "Type the answer as a message, or use the buttons.",
             parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
+    # The command goes to whichever terminal is selected. The first one is
+    # created on demand, so nobody has to think about terminals until they
+    # want a second.
+    terminal_row = await db.get_active_terminal(user_id)
+    if terminal_row is None or int(terminal_row["host_id"]) != host.id:
+        terminal_id = await db.ensure_terminal(user_id, host.id)
+        await db.set_active_terminal(user_id, terminal_id)
+    else:
+        terminal_id = int(terminal_row["id"])
+
     try:
         block = await sessions.execute(user_id, host, text,
+                                       terminal_id=terminal_id,
                                        on_progress=on_progress,
                                        on_idle=on_idle)
     except ConnectionError as exc:

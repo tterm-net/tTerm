@@ -726,7 +726,9 @@ async def test_sharing() -> None:
                     / "bot" / "handlers.py").read_text("utf-8")
     check("picking a machine checks permission", "db.can_use" in handlers_src,
           "otherwise someone else's machine could be picked by number")
-    check("revocation cuts the session", "sessions.drop(grantee" in handlers_src)
+    check("revocation cuts the session",
+          "sessions.drop_host(grantee" in handlers_src,
+          "every terminal of theirs on that machine, not just one")
     check("a recipient cannot manage someone else's machine",
           "_not_owner" in handlers_src,
           "otherwise they could uninstall the agent or remove the machine")
@@ -918,12 +920,12 @@ async def test_machines_view() -> None:
     # Every screen must go through show_screen: it sends in-message buttons
     # and falls back to the plain layout only if Telegram refused them.
     import re as _re
-    # Three are allowed: the two fallback branches inside _replace — one per
-    # exception type — and the command output card, which stays a plain
-    # message on purpose.
+    # Four are allowed: two fallback branches inside _replace, the command
+    # output card that stays a plain message on purpose, and the one-question
+    # rename prompt, which needs a Cancel button and nothing else.
     answers = _re.findall(r"\.answer\([^)]*reply_markup=", handlers_all)
     check("menus and screens do not send the old keyboard directly",
-          len(answers) <= 3, str(answers[:4]))
+          len(answers) <= 4, str(answers[:5]))
     # HTML tags are not parsed inside rich blocks and show up as literal text.
     # Check that none are fed into machines.para anywhere.
     import re as _re2
@@ -1094,6 +1096,28 @@ async def test_live_output() -> None:
           live.pending_prompt(now=live.last_change + 6) is None)
 
     from tterm.core.config import config as _cfg
+    # on_progress runs on a timer, not on new output. Stamping the "changed"
+    # mark on every call meant the output never looked quiet, and a command
+    # waiting for an answer was never noticed — which is exactly what happened
+    # on the first live try.
+    repeat = LiveOutput()
+    repeat.feed("Password: ")
+    mark = repeat.last_change
+    for _ in range(5):
+        same = "Password: "
+        repeat.feed(same[len(repeat.text):] if same.startswith(repeat.text)
+                    else same)
+    check("repeated identical output does not reset the mark",
+          repeat.last_change == mark)
+    check("so the question is still spotted",
+          repeat.pending_prompt(now=mark + 3) is not None)
+
+    growing = LiveOutput()
+    growing.feed("step 1\n")
+    growing.feed("step 2\n")
+    check("output that keeps growing is not a question",
+          growing.pending_prompt(now=growing.last_change + 5) is None)
+
     check("the draft is refreshed several times a second",
           DRAFT_INTERVAL < _cfg.STREAM_EDIT_INTERVAL,
           "drafts are made for streaming, plain edits were not")
@@ -1101,6 +1125,9 @@ async def test_live_output() -> None:
     handlers = (pathlib.Path(__file__).resolve().parents[1]
                 / "bot" / "handlers.py").read_text("utf-8")
     check("output streams into a draft", "send_message_draft" in handlers)
+    check("answer buttons go through the shared key handler",
+          'callback_data=f"key:{host.id}:{answer}"' in handlers,
+          "a private format would silently do nothing")
     check("the draft carries a stop button", "can_stop=True" in handlers)
     check("stopping the draft interrupts the command",
           "stopped_message_generation" in handlers
@@ -1113,6 +1140,127 @@ async def test_live_output() -> None:
     check("editing a message remains as a fallback",
           "Draft refused, streaming into a message instead" in handlers,
           "an older client should still see progress")
+
+
+async def test_terminals() -> None:
+    """Several terminals on one machine, the way you keep windows open."""
+    print("\nTerminals")
+
+    uid, other = 900001, 900002
+    await db.upsert_user(uid, "own", "Own")
+    await db.upsert_user(other, "guest", "Guest")
+    hid = await db.create_pending_host(uid, name="web-01", ip="10.7.7.7")
+    await db.activate_host(hid)
+
+    first = await db.ensure_terminal(uid, hid)
+    check("the first terminal is implied, not asked for",
+          await db.ensure_terminal(uid, hid) == first)
+    check("and carries no number of its own",
+          (await db.get_terminal(first))["name"] is None,
+          "numbering the only window would be noise")
+
+    second = await db.open_terminal(uid, hid)
+    third = await db.open_terminal(uid, hid)
+    check("no numbers are stored in the rows",
+          [r["name"] for r in await db.terminals_of(uid, hid)] == [None] * 3,
+          "a stored number goes wrong as soon as one is closed")
+
+    # Numbering lives in the list, not in the row: closing the middle window
+    # renumbers the rest instead of leaving a gap or repeating a number.
+    await db.close_terminal(second)
+    await db.open_terminal(uid, hid)
+    check("closing one in the middle leaves no gap",
+          [r["name"] for r in await db.terminals_of(uid, hid)] == [None] * 3,
+          "positions are assigned when the list is drawn")
+
+    named = await db.open_terminal(uid, hid, name="logs")
+    check("a terminal can be named at birth",
+          (await db.get_terminal(named))["name"] == "logs")
+    await db.rename_terminal(named, "deploy")
+    check("and renamed later",
+          (await db.get_terminal(named))["name"] == "deploy")
+    await db.rename_terminal(named, None)
+    check("and put back to a number",
+          (await db.get_terminal(named))["name"] is None)
+
+    check("terminals belong to a person, not to the machine",
+          not await db.terminals_of(other, hid),
+          "someone the machine is shared with opens their own")
+
+    await db.set_active_terminal(uid, third)
+    active = await db.get_active_terminal(uid)
+    check("the active terminal is remembered", active and active["id"] == third)
+
+    await db.close_terminal(third)
+    check("a closed terminal stops being active",
+          await db.get_active_terminal(uid) is None)
+
+    # Someone the machine is shared with opens their own windows, and losing
+    # access has to take all of them — records included. Leaving the records
+    # open would list them as owning windows on a machine they cannot reach,
+    # and hand those windows back if access ever returned.
+    from tterm.core.session_manager import sessions
+
+    guest_host = await db.create_pending_host(uid, name="shared-01",
+                                              ip="10.7.7.8")
+    await db.activate_host(guest_host)
+    await db.grant(guest_host, uid, other)
+    for _ in range(3):
+        await db.open_terminal(other, guest_host)
+    await db.set_active_terminal(other,
+                                 int((await db.terminals_of(other, guest_host))[1]["id"]))
+    check("a recipient opens terminals of their own",
+          len(await db.terminals_of(other, guest_host)) == 3)
+    check("the owner does not see them",
+          not await db.terminals_of(uid, guest_host))
+
+    await db.revoke(guest_host, other)
+    await sessions.drop_host(other, guest_host, forget=True)
+    check("revoking takes every terminal with it",
+          not await db.terminals_of(other, guest_host))
+    check("and clears the active one",
+          await db.get_active_terminal(other) is None)
+
+    # Expiry must behave exactly like a manual revoke. It used to call drop()
+    # with the wrong arguments and quietly closed nothing at all.
+    await db.grant(guest_host, uid, other, ttl_seconds=-1)
+    for _ in range(2):
+        await db.open_terminal(other, guest_host)
+    for row in await db.expire_shares():
+        await sessions.drop_host(int(row["grantee_id"]), int(row["host_id"]),
+                                 forget=True)
+    check("an expired share closes the terminals too",
+          not await db.terminals_of(other, guest_host),
+          "hiding the machine while a shell stays open is worse than nothing")
+
+    await db.grant(guest_host, uid, other)
+    await db.ensure_terminal(other, guest_host)
+    check("access granted again starts from a clean window",
+          len(await db.terminals_of(other, guest_host)) == 1)
+
+    manager_src = (pathlib.Path(__file__).resolve().parents[1]
+                   / "core" / "session_manager.py").read_text("utf-8")
+    check("expiry drops the terminals, not a stale key",
+          "drop_host(int(row[\"grantee_id\"])" in manager_src)
+
+    handlers = (pathlib.Path(__file__).resolve().parents[1]
+                / "bot" / "handlers.py").read_text("utf-8")
+    check("there is a way to open another", "newterm:" in handlers)
+    check("and to switch between them", '"term:' in handlers)
+    check("and to close one", "closeterm:" in handlers)
+    check("commands go to the selected terminal",
+          "terminal_id=terminal_id" in handlers)
+    check("a terminal can be renamed from the list", "renameterm:" in handlers)
+    check("the rename question expires",
+          "RENAME_WINDOW" in handlers,
+          "otherwise a forgotten prompt swallows a command later")
+    check("renaming can be called off", "renamecancel" in handlers)
+
+    # A session is keyed by terminal, not by machine — otherwise two windows
+    # would share one shell and a `cd` in either would move both.
+    manager = (pathlib.Path(__file__).resolve().parents[1]
+               / "core" / "session_manager.py").read_text("utf-8")
+    check("one live session per terminal", "key = terminal_id" in manager)
 
 
 async def test_shutdown() -> None:
@@ -1235,6 +1383,7 @@ async def main() -> int:
     await test_agent()
     await test_sharing()
     await test_machines_view()
+    await test_terminals()
     await test_live_output()
     await test_shutdown()
     await test_resilience()

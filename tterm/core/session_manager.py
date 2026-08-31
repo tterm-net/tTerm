@@ -26,13 +26,20 @@ class SessionManager:
         self._locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._reaper: asyncio.Task | None = None
 
-    def _lock_for(self, key: tuple[int, int]) -> asyncio.Lock:
+    def _lock_for(self, key: int) -> asyncio.Lock:
         if key not in self._locks:
             self._locks[key] = asyncio.Lock()
         return self._locks[key]
 
-    async def get_or_create(self, user_id: int, host: Host) -> TerminalSession:
-        key = (user_id, host.id)
+    async def get_or_create(self, user_id: int, host: Host,
+                            terminal_id: int) -> TerminalSession:
+        """One live session per terminal.
+
+        The key is the terminal rather than the machine: several windows on the
+        same server are the normal way to work — one tailing a log, another
+        doing something — and they must not share a shell.
+        """
+        key = terminal_id
         async with self._lock_for(key):
             session = self._sessions.get(key)
             if session and session.is_alive:
@@ -41,8 +48,8 @@ class SessionManager:
             if session:  # dead, clean it up
                 await session.close()
 
-            log.info("Opening a session user=%s host=%s (%s, %s)",
-                     user_id, host.id, host.name, host.kind)
+            log.info("Opening a session user=%s host=%s terminal=%s (%s, %s)",
+                     user_id, host.id, terminal_id, host.name, host.kind)
             # The transport follows the host kind: we dial out to a server,
             # a laptop dials in to us.
             session = AgentSession(host) if host.kind == "agent" else ShellSession(host)
@@ -58,20 +65,22 @@ class SessionManager:
         host: Host,
         command: str,
         on_progress: ProgressCallback | None = None,
+        terminal_id: int = 0,
         on_idle: IdleCallback | None = None,
     ) -> Block:
         """Runs a command and records it in the session log right away."""
-        session = await self.get_or_create(user_id, host)
-        key = (user_id, host.id)
+        session = await self.get_or_create(user_id, host, terminal_id)
+        key = terminal_id
 
         try:
             block = await session.run(command, on_progress=on_progress,
                                       on_idle=on_idle)
         except ConnectionError:
             # One reconnect attempt: the network blinked, the laptop woke up.
-            log.warning("Session dropped, reconnecting: user=%s host=%s", user_id, host.id)
-            await self.drop(user_id, host.id)
-            session = await self.get_or_create(user_id, host)
+            log.warning("Session dropped, reconnecting: user=%s terminal=%s",
+                        user_id, terminal_id)
+            await self.drop(terminal_id)
+            session = await self.get_or_create(user_id, host, terminal_id)
             block = await session.run(command, on_progress=on_progress,
                                       on_idle=on_idle)
 
@@ -85,14 +94,15 @@ class SessionManager:
             cwd=block.cwd,
             duration_ms=block.duration_ms,
             truncated=block.truncated,
+            terminal_id=terminal_id,
         )
         return block
 
-    def peek(self, user_id: int, host_id: int) -> TerminalSession | None:
-        return self._sessions.get((user_id, host_id))
+    def peek(self, terminal_id: int) -> TerminalSession | None:
+        return self._sessions.get(terminal_id)
 
-    async def drop(self, user_id: int, host_id: int) -> bool:
-        key = (user_id, host_id)
+    async def drop(self, terminal_id: int) -> bool:
+        key = terminal_id
         session = self._sessions.pop(key, None)
         if not session:
             return False
@@ -103,10 +113,36 @@ class SessionManager:
         return True
 
     async def drop_all_for_user(self, user_id: int) -> int:
-        keys = [k for k in self._sessions if k[0] == user_id]
-        for user, host_id in keys:
-            await self.drop(user, host_id)
-        return len(keys)
+        """Closes every terminal this person has open, on any machine."""
+        mine = [int(r["id"]) for r in await db.terminals_of_user(user_id)]
+        closed = 0
+        for terminal_id in mine:
+            if await self.drop(terminal_id):
+                closed += 1
+        return closed
+
+    async def drop_host(self, user_id: int, host_id: int,
+                        forget: bool = False) -> int:
+        """Closes this person's terminals on one machine.
+
+        With `forget`, the terminals themselves are closed too, not just their
+        live sessions. That is what revoking access means: leaving the records
+        open would keep someone listed as the owner of windows on a machine
+        they can no longer reach, and hand those windows back if access ever
+        returned.
+
+        Order matters — the sessions are found through the terminal records,
+        so they have to be dropped before the records go.
+        """
+        rows = await db.terminals_of(user_id, host_id)
+        closed = 0
+        for row in rows:
+            if await self.drop(int(row["id"])):
+                closed += 1
+        if forget:
+            for row in rows:
+                await db.close_terminal(int(row["id"]))
+        return closed
 
     # ------------------------------------------------------------------ reaper
 
@@ -144,7 +180,11 @@ class SessionManager:
                 for row in await db.expire_shares():
                     log.info("Access expired: host=%s for user=%s",
                              row["host_id"], row["grantee_id"])
-                    await self.drop(row["grantee_id"], row["host_id"])
+                    # Same as a manual revoke: cut the live windows and let
+                    # go of the records. Expiry that only hides the machine
+                    # would leave a working shell behind it.
+                    await self.drop_host(int(row["grantee_id"]),
+                                         int(row["host_id"]), forget=True)
                     if self.on_share_expired is not None:
                         await self.on_share_expired(dict(row))
 

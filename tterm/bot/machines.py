@@ -120,7 +120,8 @@ def back(to: str = "addhost") -> RichMessageButton:
 
 
 async def build(hosts: list[Host], active: Host | None, user_id: int,
-                online: dict[int, bool]) -> InputRichMessage:
+                online: dict[int, bool],
+                active_terminal: int | None = None) -> InputRichMessage:
     """Builds the machine list message."""
     blocks: list = [InputRichBlockParagraph(text=[RichTextBold(text=TITLE)])]
 
@@ -139,17 +140,45 @@ async def build(hosts: list[Host], active: Host | None, user_id: int,
             RichTextItalic(text=f"  {tail}"),
         ]))
 
-        # Actions appear only under the selected machine and only for its
-        # owner: someone granted access has nothing to manage.
-        if is_active and h.owner_id == user_id:
-            shares = await db.shares_of(h.id)
-            blocks.append(InputRichBlockButtons(align="left", buttons=[
+        if not is_active:
+            continue
+
+        # A machine can carry several terminals, the way you keep more than one
+        # window open on a server. They show up only under the selected
+        # machine — listing everyone's windows all the time would bury the list.
+        terminals = await db.terminals_of(user_id, h.id)
+        if len(terminals) > 1:
+            # Numbered by position, so closing one in the middle renumbers the
+            # rest instead of leaving a gap. A named terminal keeps its name.
+            row = [
                 RichMessageButton(
-                    text=f"Access ({len(shares)})" if shares else "Access",
-                    callback_data=f"shares:{h.id}"),
-                RichMessageButton(text="Remove", style="danger",
-                                  callback_data=f"askrm:{h.id}"),
-            ]))
+                    text=term["name"] or str(n),
+                    callback_data=f"term:{term['id']}",
+                    style="primary" if term["id"] == active_terminal else None,
+                )
+                for n, term in enumerate(terminals, start=1)
+            ]
+            blocks.append(InputRichBlockButtons(align="left", buttons=row))
+
+        actions = [RichMessageButton(text="+ Terminal",
+                                     callback_data=f"newterm:{h.id}")]
+        if len(terminals) > 1 and active_terminal:
+            actions.append(RichMessageButton(
+                text="Rename", callback_data=f"renameterm:{active_terminal}"))
+            actions.append(RichMessageButton(
+                text="Close", style="danger",
+                callback_data=f"closeterm:{active_terminal}"))
+
+        # The rest is management, and only the owner has any: someone granted
+        # access can work on the machine but not dispose of it.
+        if h.owner_id == user_id:
+            shares = await db.shares_of(h.id)
+            actions.append(RichMessageButton(
+                text=f"Access ({len(shares)})" if shares else "Access",
+                callback_data=f"shares:{h.id}"))
+            actions.append(RichMessageButton(text="Remove", style="danger",
+                                             callback_data=f"askrm:{h.id}"))
+        blocks.append(InputRichBlockButtons(align="left", buttons=actions))
 
     blocks.append(InputRichBlockButtons(align="left", buttons=[
         RichMessageButton(text=ADD_LABEL, callback_data="addhost",
