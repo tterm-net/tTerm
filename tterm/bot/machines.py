@@ -46,6 +46,24 @@ TITLE = "Your machines"
 ADD_LABEL = "+ Add a machine"
 
 
+async def label_for(host: Host, user_id: int, terminal_id: int | None) -> str:
+    """What this terminal is called, for the list and for the output card.
+
+    Both have to agree: seeing `web-01 (logs)` in the list and a bare `web-01`
+    above the output leaves no way to tell which window answered.
+    """
+    if terminal_id is None:
+        return host.name
+    terminals = await db.terminals_of(user_id, host.id)
+    for number, term in enumerate(terminals, start=1):
+        if int(term["id"]) != terminal_id:
+            continue
+        if number == 1 and not term["name"]:
+            return host.name
+        return f"{host.name} ({term['name'] or number})"
+    return host.name
+
+
 def _icon(host: Host) -> str:
     return PC_ICON if host.kind == "agent" else SERVER_ICON
 

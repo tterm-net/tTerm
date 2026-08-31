@@ -1296,6 +1296,26 @@ async def test_terminals() -> None:
     drawn = _tj.dumps((await machines.build(
         [view_host], view_host, uid, {hid: True}, extra
     )).model_dump(exclude_none=True, mode="json"), ensure_ascii=False)
+    # The list and the output card have to agree on the name. Seeing
+    # `web-01 (2)` in the list and a bare `web-01` above the answer leaves no
+    # way to tell which window replied.
+    named_term = await db.open_terminal(uid, hid, name="логи")
+    check("the card header names the terminal",
+          await machines.label_for(view_host, uid, named_term)
+          == f"{view_host.name} (логи)")
+    check("the first terminal keeps the plain name",
+          await machines.label_for(view_host, uid, first) == view_host.name)
+    check("an unnamed one gets its position",
+          (await machines.label_for(view_host, uid, extra)).endswith(")"))
+    await db.close_terminal(named_term)
+
+    handlers_card = (pathlib.Path(__file__).resolve().parents[1]
+                     / "bot" / "handlers.py").read_text("utf-8")
+    check("both the running card and the finished one use it",
+          handlers_card.count("State(host=label") == 1
+          and handlers_card.count("block.state.host = label") == 2,
+          "a header built twice will drift apart")
+
     check("the first line carries the plain machine name",
           '"text": "web-01"' in drawn)
     check("the others say which one they are",

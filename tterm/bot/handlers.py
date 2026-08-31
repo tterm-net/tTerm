@@ -871,6 +871,7 @@ async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host,
             terminal_id = await db.ensure_terminal(user_id, host.id)
         block = await sessions.execute(user_id, host, "true",
                                        terminal_id=terminal_id)
+        label = await machines.label_for(host, user_id, terminal_id)
     except Exception as exc:
         await bot.send_message(
             chat_id,
@@ -879,12 +880,12 @@ async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host,
             parse_mode=ParseMode.HTML)
         return
 
-    block.state.host = host.name
+    block.state.host = label
     block.state.icon = icon
     # No status dot here: the machine button in the list already carries it.
     await bot.send_message(
         chat_id,
-        f"{icon} <b>{html.escape(host.name)}</b>\n"
+        f"{icon} <b>{html.escape(label)}</b>\n"
         f"<code>{html.escape(block.state.prompt())}</code>",
         parse_mode=ParseMode.HTML)
 
@@ -1481,10 +1482,25 @@ async def run_command(message: Message, bot: Bot) -> None:
         return
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+    # The command goes to whichever terminal is selected. The first one is
+    # created on demand, so nobody has to think about terminals until they
+    # want a second.
+    terminal_row = await db.get_active_terminal(user_id)
+    if terminal_row is None or int(terminal_row["host_id"]) != host.id:
+        terminal_id = await db.ensure_terminal(user_id, host.id)
+        await db.set_active_terminal(user_id, terminal_id)
+    else:
+        terminal_id = int(terminal_row["id"])
+
+    # The header says which window answered. With two open on one machine, a
+    # bare machine name leaves no way to tell them apart.
+    label = await machines.label_for(host, user_id, terminal_id)
+
     started = time.perf_counter()
     placeholder: Message | None = None
     last_rendered = ""
-    running_state = State(host=host.name,
+    running_state = State(host=label,
                           icon=PC_ICON if host.kind == "agent" else SERVER_ICON)
     live = LiveOutput()
     # One draft per command. The id only has to be unique within the chat while
@@ -1559,16 +1575,6 @@ async def run_command(message: Message, bot: Bot) -> None:
             "Type the answer as a message, or use the buttons.",
             parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
-    # The command goes to whichever terminal is selected. The first one is
-    # created on demand, so nobody has to think about terminals until they
-    # want a second.
-    terminal_row = await db.get_active_terminal(user_id)
-    if terminal_row is None or int(terminal_row["host_id"]) != host.id:
-        terminal_id = await db.ensure_terminal(user_id, host.id)
-        await db.set_active_terminal(user_id, terminal_id)
-    else:
-        terminal_id = int(terminal_row["id"])
-
     try:
         block = await sessions.execute(user_id, host, text,
                                        terminal_id=terminal_id,
@@ -1594,7 +1600,7 @@ async def run_command(message: Message, bot: Bot) -> None:
 
     # The card header uses the name the machine has in the bot, not the
     # hostname from the marker: renaming is possible here, not on the server.
-    block.state.host = host.name
+    block.state.host = label
     block.state.icon = PC_ICON if host.kind == "agent" else SERVER_ICON
 
     card = render(
