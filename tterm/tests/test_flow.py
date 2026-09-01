@@ -275,7 +275,12 @@ def test_block_framing() -> None:
     run("mkdir -p /tmp/tt-git && cd /tmp/tt-git && git init -q 2>/dev/null; true")
     out, state, code = run("true")
     check("git branch read from .git/HEAD", bool(state.branch), f"branch={state.branch!r}")
-    check("the branch reaches the prompt", state.branch in state.prompt())
+    # The branch has its own line above the prompt: buried at the end of one
+    # it went unread, and it is often the first thing you want to know.
+    check("the branch reaches the card", state.branch in state.branch_line())
+    check("and stays out of the prompt itself",
+          state.branch not in state.prompt(),
+          state.prompt())
 
     # the dirty-tree asterisk against a real repository
     run("cd /tmp/tt-git && git config user.email a@b && git config user.name a "
@@ -377,7 +382,8 @@ def test_rendering() -> None:
     check("venv shown in brackets", "(venv)" in icon_st.prompt(), icon_st.prompt())
     with_icons = icon_st.prompt(icons=True)
     check("directory icon in the prompt", "📁" in with_icons, with_icons)
-    check("branch icon in the prompt", "🌿" in with_icons, with_icons)
+    check("branch icon on its own line", "🌿" in dirty_state.branch_line()
+          if (dirty_state := State(cwd="~/app", branch="main*")) else False)
     check("venv icon in the prompt", "🐍" in with_icons, with_icons)
     check("icons switch off with a flag", "📁" not in icon_st.prompt(icons=False))
     plain = State(cwd="/var/log", user="denis", host="web-01")
@@ -389,7 +395,18 @@ def test_rendering() -> None:
 
     # --- the dirty-tree asterisk ---
     dirty = State(cwd="~/app", user="denis", host="web-01", branch="main*")
-    check("the asterisk is visible in the prompt", "main*" in dirty.prompt(), dirty.prompt())
+    check("the asterisk is visible", "main*" in dirty.branch_line(),
+          dirty.branch_line())
+    from tterm.core.formatter import render as _render
+    in_repo = _render("ok", 0, 0.4,
+                      State(cwd="/opt/app", user="deploy", branch="main*",
+                            host="web-01"), command="git status").text
+    check("the card puts the branch above the prompt",
+          in_repo.index("🌿") < in_repo.index("deploy /opt/app"),
+          in_repo)
+    check("outside a repository there is no branch line",
+          State(cwd="/etc", user="root").branch_line() == "",
+          "a blank line kept for alignment reads worse than none")
     check("the asterisk does not break the bash style", "main" not in dirty.prompt(style=3))
     check("the bootstrap detects uncommitted changes",
           "--no-optional-locks" in BOOTSTRAP and "status --porcelain" in BOOTSTRAP)

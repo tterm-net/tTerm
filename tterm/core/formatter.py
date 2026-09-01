@@ -197,6 +197,20 @@ class State:
     def is_root(self) -> bool:
         return self.euid == 0
 
+    def branch_line(self) -> str:
+        """The git branch, on its own line above the prompt.
+
+        Kept out of the prompt itself: the prompt answers "where am I and as
+        whom", and a branch buried at the end of it went unread. On its own
+        line it is the first thing seen.
+
+        Empty outside a repository — most directories are not one, and a blank
+        line kept for the sake of alignment reads worse than no line at all.
+        The virtualenv stays in the prompt: it describes how the command runs,
+        not where it runs.
+        """
+        return f"{BRANCH_ICON} {self.branch}" if self.branch else ""
+
     def prompt(self, style: int | None = None, icons: bool | None = None) -> str:
         style = PROMPT_STYLE if style is None else style
         icons = PROMPT_ICONS if icons is None else icons
@@ -215,8 +229,6 @@ class State:
             if SHOW_USER and self.user:
                 parts.append(self.user)
             parts.append(self.cwd)
-            if self.branch:
-                parts.append(self.branch)
             if self.venv:
                 parts.append(f"({self.venv})")
             parts.append(sign)
@@ -226,8 +238,6 @@ class State:
         if style == 1 and self.host:
             parts.append(f"🖥 {self.host}")
         parts.append(f"{DIR_ICON} {self.cwd}")
-        if self.branch:
-            parts.append(f"{BRANCH_ICON} {self.branch}")
         if self.venv:
             parts.append(f"{VENV_ICON} {self.venv}")
         return SEP.join(parts) + f" {sign}"
@@ -398,7 +408,12 @@ def render(
     text = clean_output(output)
     lang = lang or detect_lang(command, text)
     lines = text.split("\n") if text else []
-    prompt = f"<code>{esc(state.prompt())}</code>"
+    # The branch sits above the prompt, not inside it: buried at the end of
+    # a prompt it went unread, and knowing which branch a command ran on is
+    # often the first thing you want.
+    branch = state.branch_line()
+    prompt = (f"<i>{esc(branch)}</i>\n" if branch else "") + \
+             f"<code>{esc(state.prompt())}</code>"
     header = _host_header(state)
 
     fits = len(text) <= SAFE_CHARS and len(lines) <= MAX_LINES

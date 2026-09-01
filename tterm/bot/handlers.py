@@ -928,7 +928,9 @@ async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host,
     await bot.send_message(
         chat_id,
         f"{icon} <b>{html.escape(label)}</b>\n"
-        f"<code>{html.escape(block.state.prompt())}</code>",
+        + (f"<i>{html.escape(block.state.branch_line())}</i>\n"
+           if block.state.branch_line() else "")
+        + f"<code>{html.escape(block.state.prompt())}</code>",
         parse_mode=ParseMode.HTML)
 
 
