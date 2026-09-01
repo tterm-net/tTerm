@@ -101,12 +101,22 @@ class LiveOutput:
             return
         self.text += chunk
         self.last_change = time.monotonic()
+        # New output means the question was answered — or was never one.
+        self.announced = None
 
     @property
     def elapsed(self) -> float:
         return time.monotonic() - self.started
 
     def should_draw(self, now: float | None = None) -> bool:
+        """Whether the card is worth refreshing.
+
+        Once a question has been announced the card stops ticking: the output
+        is not moving, and a timer counting up next to a repeat of the same
+        question only makes the screen busier.
+        """
+        if self.announced is not None:
+            return False
         now = time.monotonic() if now is None else now
         return now - self.last_draw >= DRAFT_INTERVAL
 

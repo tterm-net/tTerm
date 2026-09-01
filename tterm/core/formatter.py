@@ -71,10 +71,15 @@ ROOT_SIGN = "#"
 # are still worth scrolling on a phone. Either threshold can fire, and they
 # catch different cases: `apt install` hits the line count, a single long
 # `cat` line hits the character count.
+#
+# It was 30, which turned out too eager: forty lines of test output — under
+# 1.5 KB, a third of what a message holds — went out as a file, leaving a
+# stub in the chat and the rest a tap away. A file earns its place at
+# hundreds of lines, not at forty.
 # ─────────────────────────────────────────────────────────────────────────────
 
 SAFE_CHARS = 3200         # headroom under 4096 for status, prompt and markup
-MAX_LINES = 30
+MAX_LINES = 60
 # Telegram lays out a document caption in a column as wide as the file card,
 # not the full message width. On desktop long lines wrap into three and the
 # tail becomes unreadable. So the caption keeps few and short lines: the

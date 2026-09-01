@@ -1044,6 +1044,63 @@ async def test_machines_view() -> None:
           "a single Remove button is enough")
 
 
+async def test_output_thresholds() -> None:
+    """Where the line between a message and a file falls."""
+    print("\nMessage or file")
+    from tterm.core.formatter import MAX_LINES, SAFE_CHARS, State, render
+
+    st = State(cwd="~", user="deploy", host="web-01")
+
+    def mode(text: str) -> str:
+        return render(text, 0, 1.0, st, command="pytest").mode
+
+    # Forty lines of test output is about 1.4 KB — a third of what a message
+    # holds. Sending that as a file left a stub in the chat and the rest a tap
+    # away, which is how the old limit of 30 lines was found to be too eager.
+    forty = "\n".join(f"  ✓ check number {i}" for i in range(40))
+    check("forty lines still fit in a message", mode(forty) == "text",
+          f"{len(forty)} chars")
+
+    check("the line limit is generous but finite", 40 < MAX_LINES < 100,
+          f"MAX_LINES={MAX_LINES}")
+    check("past it, a file", mode("\n".join(f"line {i}" for i in range(200)))
+          == "file")
+
+    # The two limits catch different things: one long `cat` line is short on
+    # lines and huge on characters.
+    check("a single very long line goes to a file",
+          mode("x" * (SAFE_CHARS + 100)) == "file")
+    check("and a short one does not", mode("done") == "text")
+
+    # When it does go to a file, the file holds everything. The caption is the
+    # abridged part — piecing a full answer together from a stub and a partial
+    # file would be worse than either.
+    from tterm.core.formatter import MAX_FILE_CHARS
+
+    body = "\n".join(f"line {i}" for i in range(200))
+    card = render(body, 0, 1.0, st, command="ls")
+    check("the file keeps every line", card.file_body.strip() == body,
+          f"{len(card.file_body.splitlines())} of {len(body.splitlines())}")
+    check("the caption only shows the tail",
+          card.text.count("line ") < 10,
+          "the details are in the file")
+
+    long_line = "x" * (SAFE_CHARS + 2000)
+    check("a single huge line survives whole",
+          render(long_line, 0, 1.0, st, command="cat").file_body.strip()
+          == long_line)
+
+    # The one place output is cut is far beyond any real command, and it says
+    # so in the first line rather than leaving a silent gap.
+    huge = "\n".join(f"x{i}" for i in range(400_000))
+    trimmed = render(huge, 0, 1.0, st, command="ls").file_body
+    check("an enormous output is trimmed from the top",
+          len(trimmed) <= MAX_FILE_CHARS + 100 and trimmed.endswith("x399999\n"),
+          "the end is what a command that verbose is judged by")
+    check("and the cut is stated, not silent",
+          "dropped" in trimmed.splitlines()[0])
+
+
 async def test_live_output() -> None:
     """Streaming and spotting a command that is waiting for an answer."""
     print("\nLive output")
@@ -1117,6 +1174,20 @@ async def test_live_output() -> None:
     growing = LiveOutput()
     growing.feed("step 1\n")
     growing.feed("step 2\n")
+    # Once the question is announced the card stops ticking: a timer counting
+    # up beside a repeat of the same question only makes the screen busier.
+    frozen = LiveOutput()
+    frozen.feed("Password: ")
+    frozen.last_draw = 0.0
+    check("the card ticks while output is expected", frozen.should_draw())
+    frozen.announced = "Password:"
+    check("and freezes once the question is announced", not frozen.should_draw())
+    frozen.feed("ok\n")
+    frozen.last_draw = 0.0
+    check("new output un-freezes it", frozen.should_draw())
+    check("and clears the announcement", frozen.announced is None,
+          "so the next question is announced too")
+
     check("output that keeps growing is not a question",
           growing.pending_prompt(now=growing.last_change + 5) is None)
 
@@ -1131,6 +1202,10 @@ async def test_live_output() -> None:
           'callback_data=f"key:{host.id}:{answer}"' in handlers,
           "a private format would silently do nothing")
     check("the draft carries a stop button", "can_stop=True" in handlers)
+    check("the announcement is a real newline, not two characters",
+          '\\\\n"' not in handlers.split("is waiting for an answer")[1][:40],
+          "an over-escaped break shows up as \\n in the chat")
+
     check("stopping the draft interrupts the command",
           "stopped_message_generation" in handlers
           and 'send_key(b"\\x03")' in handlers,
@@ -1373,6 +1448,10 @@ async def test_terminals() -> None:
           "RENAME_WINDOW" in handlers,
           "otherwise a forgotten prompt swallows a command later")
     check("renaming can be called off", "renamecancel" in handlers)
+    check("a rename ends with the prompt under the new name",
+          "await select_terminal(message.bot, message.chat.id, user_id, host,"
+          in handlers,
+          "the prompt carries the name, so it is the confirmation")
 
     # A session is keyed by terminal, not by machine — otherwise two windows
     # would share one shell and a `cd` in either would move both.
@@ -1502,6 +1581,7 @@ async def main() -> int:
     await test_sharing()
     await test_machines_view()
     await test_terminals()
+    await test_output_thresholds()
     await test_live_output()
     await test_shutdown()
     await test_resilience()

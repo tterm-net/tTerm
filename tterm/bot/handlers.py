@@ -412,10 +412,11 @@ async def _apply_rename(message: Message, user_id: int, term_id: int,
     host = await db.get_host(int(term["host_id"]))
     await show_machines(message.bot, message.chat.id, user_id)
     if host is not None:
-        label = clean or "its number"
-        await message.answer(f"Terminal renamed to <b>{html.escape(label)}</b>."
-                             if clean else "Terminal is back to its number.",
-                             parse_mode=ParseMode.HTML)
+        # The prompt is the confirmation: it carries the new name, so seeing
+        # it is seeing that the rename took. A separate "renamed to X" line
+        # would say the same thing twice.
+        await select_terminal(message.bot, message.chat.id, user_id, host,
+                              term_id)
 
 
 @router.callback_query(F.data == "renamecancel")
@@ -1610,7 +1611,7 @@ async def run_command(message: Message, bot: Bot) -> None:
                   style=ButtonStyle.DANGER)
         kb.adjust(3)
         await message.answer(
-            f"⌨️ <b>{html.escape(host.name)}</b> is waiting for an answer:\\n"
+            f"⌨️ <b>{html.escape(label)}</b> is waiting for an answer:\n"
             f"<pre>{html.escape(question)}</pre>"
             "Type the answer as a message, or use the buttons.",
             parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
