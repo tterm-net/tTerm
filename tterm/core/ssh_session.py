@@ -285,7 +285,7 @@ class ShellSession(TerminalSession):
             pass
         return _decode(bytes(buf))
 
-    def _pinned_key(self):
+    def _pinned_key(self) -> bytes | None:
         """The host key recorded when the machine was registered.
 
         The install script reads /etc/ssh/ssh_host_ed25519_key.pub and sends it
@@ -314,14 +314,22 @@ class ShellSession(TerminalSession):
                         self.host.id, exc_info=True)
             return None
 
+        # The bracket form is only for non-default ports. On port 22 asyncssh
+        # looks the entry up with no port at all, and `[addr]:22` is not found
+        # that way — which reads as "the key does not match" and locks the
+        # machine out. This is the OpenSSH convention too, not a workaround.
+        where = (self.host.ip if self.host.ssh_port == 22
+                 else f"[{self.host.ip}]:{self.host.ssh_port}")
+        # Handed over as bytes rather than a parsed object: that is the form
+        # asyncssh documents and every version accepts.
+        entry = f"{where} {self.host.host_pubkey}\n"
         try:
-            return asyncssh.import_known_hosts(
-                f"[{self.host.ip}]:{self.host.ssh_port} {self.host.host_pubkey}\n"
-            )
+            asyncssh.import_known_hosts(entry)      # fails loudly here, not mid-connect
         except Exception:
             log.warning("Could not build a known-hosts entry for host=%s",
                         self.host.id, exc_info=True)
             return None
+        return entry.encode()
 
     @property
     def is_alive(self) -> bool:

@@ -1537,6 +1537,28 @@ async def test_host_key_pinning() -> None:
     session = ShellSession(host)
     known = session._pinned_key()
     check("a pinned key becomes a known-hosts entry", known is not None)
+    check("handed to asyncssh as bytes", isinstance(known, bytes),
+          "the documented form; a parsed object is version-dependent")
+    # On the default port asyncssh looks the entry up with no port at all,
+    # so `[addr]:22` is never found — which reads as "wrong key" and locks the
+    # machine out. This is the OpenSSH convention too: brackets are for other
+    # ports only. Cost one production server its access before it was noticed.
+    import asyncssh as _assh
+    check("on port 22 the entry carries no port",
+          known and known.startswith(b"10.20.30.40 "), str(known))
+    found = _assh.import_known_hosts(known.decode()).match(
+        "10.20.30.40", "10.20.30.40", None)[0]
+    check("and is found the way asyncssh looks for it", len(found) > 0)
+
+    odd = await db.create_pending_host(uid, name="odd-port", ip="10.20.30.43",
+                                       ssh_port=2222, host_pubkey=pub)
+    await db.activate_host(odd)
+    odd_entry = ShellSession(await db.get_host(odd))._pinned_key()
+    check("on any other port it does carry one",
+          odd_entry.startswith(b"[10.20.30.43]:2222 "), str(odd_entry))
+    check("and is found with that port",
+          len(_assh.import_known_hosts(odd_entry.decode()).match(
+              "10.20.30.43", "10.20.30.43", 2222)[0]) > 0)
 
     # Machines registered before this check existed have no key. Refusing them
     # would lock people out of servers that work; the key is recorded the next
