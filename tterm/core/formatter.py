@@ -197,6 +197,40 @@ class State:
     def is_root(self) -> bool:
         return self.euid == 0
 
+    #: Prompts longer than this get their path shortened. Measured on the whole
+    #: line, not on the path: a short path next to a long user name still adds
+    #: up to something that wraps on a phone.
+    PROMPT_BUDGET = 40
+
+    #: Path components kept at the end. The last one answers "where am I" and
+    #: is never touched; the one before it usually says which project.
+    KEEP_TAIL = 2
+
+    @staticmethod
+    def short_path(path: str, room: int) -> str:
+        """Squeezes the middle out of a deep path.
+
+        `/opt/tterm-src/tterm/core/templates` becomes `/opt/…/core/templates`.
+        The same thing fish and starship do, so it reads as shortening rather
+        than as a mangled path.
+        """
+        if len(path) <= room:
+            return path
+
+        head, sep, rest = path.partition("/")
+        parts = [p for p in rest.split("/") if p] if sep else path.split("/")
+        if len(parts) <= State.KEEP_TAIL + 1:
+            return path                      # nothing in the middle to drop
+
+        first, tail = parts[0], parts[-State.KEEP_TAIL:]
+        prefix = f"{head}/" if sep else ""
+        return prefix + "/".join([first, "…", *tail])
+
+    def _cwd_for(self, other_parts: int) -> str:
+        """The directory, shortened only if the whole line would run long."""
+        room = State.PROMPT_BUDGET - other_parts
+        return self.short_path(self.cwd, max(room, 12))
+
     def branch_line(self) -> str:
         """The git branch, on its own line above the prompt.
 
@@ -228,7 +262,12 @@ class State:
             # not say who the command runs as.
             if SHOW_USER and self.user:
                 parts.append(self.user)
-            parts.append(self.cwd)
+            # Everything else is measured first: the directory gets whatever
+            # room is left before the line starts wrapping on a phone.
+            around = len(" ".join(parts)) + len(sign) + 2
+            if self.venv:
+                around += len(self.venv) + 3
+            parts.append(self._cwd_for(around))
             if self.venv:
                 parts.append(f"({self.venv})")
             parts.append(sign)
@@ -237,7 +276,7 @@ class State:
         parts = []
         if style == 1 and self.host:
             parts.append(f"🖥 {self.host}")
-        parts.append(f"{DIR_ICON} {self.cwd}")
+        parts.append(f"{DIR_ICON} {self._cwd_for(len(' '.join(parts)) + 6)}")
         if self.venv:
             parts.append(f"{VENV_ICON} {self.venv}")
         return SEP.join(parts) + f" {sign}"
@@ -326,6 +365,68 @@ def clean_output(raw: str) -> str:
     text = _CTRL.sub("", text)
     text = _BLANKS.sub("\n\n", text)
     return text.strip("\n")
+
+
+#: Lines are grouped by their first word with the numbers taken out, so
+#: `Get:1 http://a` and `Get:2 http://b` land together as `Get:#`, and every
+#: `Unpacking …` line does too. Anything past the first word varies too much
+#: to group on — that was the first attempt, and it grouped nothing.
+_LEAD = re.compile(r"^\s*(\S+)")
+_NUMS = re.compile(r"\d+")
+
+#: A run shorter than this is left alone: three lines said in full read better
+#: than three lines summarised.
+COLLAPSE_RUN = 4
+
+
+def condense(text: str, keep_last: int = 4, budget: int = 14) -> str:
+    """A readable summary of a long output, for the file caption.
+
+    Never used in place of the output itself — only where the caption would
+    otherwise show the last six lines, which for `apt` means `Processing
+    triggers` and nothing about what was installed.
+
+    Runs of similar lines become one line with a count; the last few are kept
+    word for word, because that is where the result and the error are.
+    """
+    lines = [ln for ln in text.split("\n")]
+    if len(lines) <= keep_last:
+        return text
+
+    head, tail = lines[:-keep_last], lines[-keep_last:]
+
+    grouped: list[str] = []
+    run_key: str | None = None
+    run: list[str] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        if len(run) >= COLLAPSE_RUN:
+            grouped.append(f"{run[0]}   … {len(run)} lines")
+        else:
+            grouped.extend(run)
+        run.clear()
+
+    for line in head:
+        match = _LEAD.match(line)
+        key = _NUMS.sub("#", match.group(1)) if match and line.strip() else None
+        if key is not None and key == run_key:
+            run.append(line)
+            continue
+        flush()
+        run_key = key
+        run = [line] if line.strip() else []
+        if not line.strip():
+            grouped.append(line)
+    flush()
+
+    # Still too long: the middle is what goes, not the end.
+    if len(grouped) > budget:
+        dropped = len(grouped) - budget
+        grouped = grouped[:budget - 1] + [f"…   {dropped} more lines"]
+
+    return "\n".join(grouped + tail).strip("\n")
 
 
 # Telegram does the highlighting itself from the language-* class. Output
@@ -427,7 +528,12 @@ def render(
         parts.append(prompt)
         return Rendered("text", "\n".join(parts), lines=len(lines), chars=len(text))
 
-    tail = lines[-TAIL_LINES:]
+    # A summary rather than the last six lines. For `apt` those are
+    # "Processing triggers", which says nothing about what was installed,
+    # while the count of packages sits higher up. Nothing is lost either way:
+    # the file below holds every line.
+    tail = condense(text, keep_last=TAIL_LINES // 2,
+                    budget=TAIL_LINES * 2).split("\n")
     # The caption is laid out in a narrow column as wide as the file card, so
     # Telegram would wrap a long line into three. Cutting reads better.
     tail = [
@@ -442,7 +548,7 @@ def render(
         f"{_status(exit_code, duration)} · <i>{len(lines)} lines, {size_kb} KB</i>"
     ]
     if tail:
-        caption.append(_pre("…\n" + "\n".join(tail), lang))
+        caption.append(_pre("\n".join(tail), lang))
     if exit_code != 0 and stderr:
         caption.append(f"<i>{esc(clean_output(stderr).split(chr(10))[0])}</i>")
     caption.append(prompt)

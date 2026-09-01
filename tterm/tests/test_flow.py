@@ -1477,6 +1477,76 @@ async def test_terminals() -> None:
     check("one live session per terminal", "key = terminal_id" in manager)
 
 
+async def test_short_paths() -> None:
+    """A deep path is squeezed so the prompt stays on one line."""
+    print("\nLong paths")
+    from tterm.core.formatter import State
+
+    short = State(cwd="/opt/tterm-src", user="tterm").prompt()
+    check("a short path is left alone", "/opt/tterm-src" in short, short)
+    check("and so is the home directory",
+          State(cwd="~", user="tterm").prompt() == "tterm ~ ❯")
+
+    deep = State(cwd="/opt/tterm-src/tterm/core/templates", user="tterm").prompt()
+    check("a deep one is squeezed", "…" in deep, deep)
+    check("the last part is never touched", deep.endswith("templates ❯"), deep)
+    check("the root of the path stays", "/opt/" in deep, deep)
+    check("and the line fits", len(deep) <= State.PROMPT_BUDGET, f"{len(deep)}")
+
+    # The budget covers the whole line: a virtualenv name takes room too, and
+    # measuring only the path would let the prompt wrap anyway.
+    with_venv = State(cwd="/opt/tterm-src/tterm/core/templates", user="tterm",
+                      venv="venv").prompt()
+    check("a virtualenv is counted in", "…" in with_venv, with_venv)
+
+    check("a path with nothing in the middle is kept whole",
+          "…" not in State(cwd="/var/log", user="x").prompt())
+
+
+async def test_condensed_caption() -> None:
+    """A long output gets a summary in the caption, not its last six lines."""
+    print("\nNoisy commands")
+    from tterm.core.formatter import State, condense, render
+
+    apt = "\n".join(
+        [f"Get:{i} http://archive.ubuntu.com noble pkg-{i} [{i * 12} kB]"
+         for i in range(1, 40)]
+        + ["Fetched 12.4 MB in 3s (4,100 kB/s)"]
+        + [f"Unpacking pkg-{i} (1.{i}) over (1.{i - 1}) ..." for i in range(1, 30)]
+        + [f"Setting up pkg-{i} (1.{i}) ..." for i in range(1, 30)]
+        + ["Processing triggers for man-db (2.12.0-4build2) ...",
+           "39 upgraded, 0 newly installed, 0 to remove and 1 not upgraded."])
+
+    short = condense(apt)
+    check("a hundred lines of apt become a handful",
+          len(short.split("\n")) < 12, f"{len(short.split(chr(10)))} lines")
+    check("runs of similar lines are counted", "… 39 lines" in short, short)
+    check("the result survives",
+          "39 upgraded, 0 newly installed" in short,
+          "the line people actually read")
+
+    # Errors are never part of a run of routine chatter and must come through
+    # word for word.
+    noisy_error = "\n".join(
+        [f"Get:{i} http://archive.ubuntu.com pkg-{i}" for i in range(1, 9)]
+        + ["E: Unable to locate package nonexistent"])
+    check("an error among the noise is kept in full",
+          "E: Unable to locate package nonexistent" in condense(noisy_error))
+
+    check("a short output is left alone",
+          condense("one\ntwo\nthree") == "one\ntwo\nthree")
+
+    # The point is the caption, not the output: the file still holds every
+    # line, so nothing is hidden — only the summary above it changes.
+    st = State(cwd="~", user="deploy", host="web-01")
+    card = render(apt, 0, 41.2, st, command="apt upgrade -y")
+    check("the file keeps all of it",
+          card.file_body.strip("\n") == apt,
+          "the summary replaces the caption, never the output")
+    check("the caption summarises instead of trailing off",
+          "… 39 lines" in card.text and "39 upgraded" in card.text)
+
+
 async def test_dangerous_commands() -> None:
     """Commands worth one question before they run."""
     print("\nDestructive commands")
@@ -1718,6 +1788,8 @@ async def main() -> int:
     await test_terminals()
     await test_output_thresholds()
     await test_live_output()
+    await test_short_paths()
+    await test_condensed_caption()
     await test_dangerous_commands()
     await test_host_key_pinning()
     await test_shutdown()
