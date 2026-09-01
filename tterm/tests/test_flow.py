@@ -1560,10 +1560,23 @@ async def test_condensed_caption() -> None:
             check("a collapsed line keeps its count",
                   line.rstrip().endswith("lines"), line)
             break
-    check("the last line is never cut",
+    from tterm.core.formatter import CAPTION_TAIL_CHARS
+    check("a conclusion at the end survives whole",
           "39 upgraded, 0 newly installed, 0 to remove and 1 not upgraded."
-          in narrow,
-          "a wrapped conclusion beats a truncated one")
+          in condense(apt, keep_last=3, budget=12, width=CAPTION_LINE_CHARS,
+                      tail_width=CAPTION_TAIL_CHARS),
+          "that is the line people read")
+
+    # But the last lines are not always a conclusion. On `apt list` they are
+    # more package lines, and left whole they fill the caption on their own.
+    listing = "\n".join(
+        f"{n}/noble-updates,now 1.2.3 amd64 [installed,automatic]"
+        for n in [f"package-with-a-long-name-{i}" for i in range(80)])
+    capped = condense(listing, keep_last=3, budget=12,
+                      width=CAPTION_LINE_CHARS, tail_width=CAPTION_TAIL_CHARS)
+    check("but a long tail line is still cut",
+          max(len(x) for x in capped.split("\n")) <= CAPTION_TAIL_CHARS,
+          f"longest={max(len(x) for x in capped.split(chr(10)))}")
 
 
 async def test_dangerous_commands() -> None:
