@@ -342,10 +342,15 @@ def test_rendering() -> None:
     check("the caption fits Telegram's limit", len(card.text) <= 1024, len(card.text))
     check("the caption holds the tail, not the head", "line 199" in card.text
           and "line 0\n" not in card.text)
-    from tterm.core.formatter import CAPTION_LINE_CHARS
+    from tterm.core.formatter import CAPTION_LINE_CHARS, TAIL_LINES
     wide = "\n".join("z" * 200 for _ in range(50))
     wide_card = render(wide, 0, 0.1, st, command="cat wide")
-    longest = max(len(x) for x in wide_card.text.split("\n"))
+    body = wide_card.text.split("\n")
+    # The last lines are left whole on purpose — the result and the error live
+    # there, and a wrapped conclusion beats a truncated one. Everything above
+    # them is cut to the width of the column.
+    above = body[:-(TAIL_LINES // 2 + 2)]
+    longest = max((len(x) for x in above), default=0)
     check("long caption lines are cut, not wrapped",
           longest <= CAPTION_LINE_CHARS + 10, f"longest={longest}")
 
@@ -1545,6 +1550,20 @@ async def test_condensed_caption() -> None:
           "the summary replaces the caption, never the output")
     check("the caption summarises instead of trailing off",
           "… 39 lines" in card.text and "39 upgraded" in card.text)
+
+    # The caption sits in a narrow column, so lines are cut — but the count
+    # has to survive the cut, and the conclusion must not be cut at all.
+    from tterm.core.formatter import CAPTION_LINE_CHARS
+    narrow = condense(apt, keep_last=3, budget=12, width=CAPTION_LINE_CHARS)
+    for line in narrow.split("\n"):
+        if "…" in line and "lines" in line:
+            check("a collapsed line keeps its count",
+                  line.rstrip().endswith("lines"), line)
+            break
+    check("the last line is never cut",
+          "39 upgraded, 0 newly installed, 0 to remove and 1 not upgraded."
+          in narrow,
+          "a wrapped conclusion beats a truncated one")
 
 
 async def test_dangerous_commands() -> None:

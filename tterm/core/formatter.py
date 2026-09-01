@@ -86,7 +86,10 @@ MAX_LINES = 60
 # details are in the file anyway, the caption only shows how it ended.
 TAIL_LINES = 6            # last lines kept in the file caption
 CAPTION_CHARS = 400       # headroom under the 1024 limit
-CAPTION_LINE_CHARS = 72   # longer lines are cut: wrapping reads worse
+# The caption sits in a narrow column beside the file card — narrower than a
+# message. At 72 a single line wrapped into three, and a six-line summary
+# turned into a wall. Cutting at 40 keeps one line one line.
+CAPTION_LINE_CHARS = 40
 MAX_FILE_CHARS = 2_000_000  # beyond this the file itself is trimmed from the top
 
 # Streaming: while editing one message we show the tail, not everything
@@ -379,7 +382,8 @@ _NUMS = re.compile(r"\d+")
 COLLAPSE_RUN = 4
 
 
-def condense(text: str, keep_last: int = 4, budget: int = 14) -> str:
+def condense(text: str, keep_last: int = 4, budget: int = 14,
+             width: int | None = None) -> str:
     """A readable summary of a long output, for the file caption.
 
     Never used in place of the output itself — only where the caption would
@@ -389,6 +393,9 @@ def condense(text: str, keep_last: int = 4, budget: int = 14) -> str:
     Runs of similar lines become one line with a count; the last few are kept
     word for word, because that is where the result and the error are.
     """
+    def cut(line: str, room: int) -> str:
+        return line if len(line) <= room else line[: room - 1] + "…"
+
     lines = [ln for ln in text.split("\n")]
     if len(lines) <= keep_last:
         return text
@@ -403,9 +410,14 @@ def condense(text: str, keep_last: int = 4, budget: int = 14) -> str:
         if not run:
             return
         if len(run) >= COLLAPSE_RUN:
-            grouped.append(f"{run[0]}   … {len(run)} lines")
+            note = f"   … {len(run)} lines"
+            # The sample is trimmed to make room for the count. Cutting the
+            # finished line instead would take the count off the end, which
+            # is the one part worth keeping.
+            head = cut(run[0], width - len(note)) if width else run[0]
+            grouped.append(head + note)
         else:
-            grouped.extend(run)
+            grouped.extend(cut(ln, width) if width else ln for ln in run)
         run.clear()
 
     for line in head:
@@ -426,6 +438,8 @@ def condense(text: str, keep_last: int = 4, budget: int = 14) -> str:
         dropped = len(grouped) - budget
         grouped = grouped[:budget - 1] + [f"…   {dropped} more lines"]
 
+    # The tail is never cut: that is where the result and the error are, and
+    # a wrapped conclusion beats a truncated one.
     return "\n".join(grouped + tail).strip("\n")
 
 
@@ -532,14 +546,8 @@ def render(
     # "Processing triggers", which says nothing about what was installed,
     # while the count of packages sits higher up. Nothing is lost either way:
     # the file below holds every line.
-    tail = condense(text, keep_last=TAIL_LINES // 2,
-                    budget=TAIL_LINES * 2).split("\n")
-    # The caption is laid out in a narrow column as wide as the file card, so
-    # Telegram would wrap a long line into three. Cutting reads better.
-    tail = [
-        (ln[: CAPTION_LINE_CHARS - 1] + "…") if len(ln) > CAPTION_LINE_CHARS else ln
-        for ln in tail
-    ]
+    tail = condense(text, keep_last=TAIL_LINES // 2, budget=TAIL_LINES * 2,
+                    width=CAPTION_LINE_CHARS).split("\n")
     while tail and len("\n".join(tail)) > CAPTION_CHARS:
         tail = tail[1:]
 
