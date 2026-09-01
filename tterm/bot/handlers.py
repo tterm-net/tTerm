@@ -29,6 +29,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..core.config import config
 from ..core.db import Host, db
+from ..core.danger import (CONFIRM_WINDOW, hits_everything,
+                           looks_destructive)
 from ..core.live import LiveOutput, YES_NO, is_yes_no
 from ..core.formatter import (
     PC_ICON,
@@ -360,6 +362,40 @@ async def _shares_view(host: Host):
     fallback = (f"{icon} <code>#{host.id}</code> <b>{html.escape(host.name)}</b>"
                 f" · access\n\n{body}")
     return rich, fallback, kb.as_markup()
+
+
+#: Commands held back for one confirmation: user id -> (command, deadline).
+#: The command is kept here rather than in the button, where callback data is
+#: capped at 64 bytes and a real command rarely fits.
+_PENDING: dict[int, tuple[str, float]] = {}
+
+#: Set for one command after the person confirmed it, so the same check does
+#: not stop it a second time.
+_confirmed: dict[int, bool] = {}
+
+
+@router.callback_query(F.data == "runyes")
+async def cb_run_confirmed(call: CallbackQuery) -> None:
+    """Runs the command that was held back."""
+    if call.from_user is None or call.message is None:
+        return
+    held = _PENDING.pop(call.from_user.id, None)
+    if held is None or time.monotonic() > held[1]:
+        await call.answer("That has expired — send it again", show_alert=True)
+        return
+    await call.answer()
+    _confirmed[call.from_user.id] = True
+    await _replace(call, f"<code>{html.escape(held[0])}</code>")
+    await run_command(call.message.model_copy(
+        update={"text": held[0], "from_user": call.from_user}), call.bot)
+
+
+@router.callback_query(F.data == "runno")
+async def cb_run_cancelled(call: CallbackQuery) -> None:
+    if call.from_user is not None:
+        _PENDING.pop(call.from_user.id, None)
+    await call.answer("Cancelled")
+    await _replace(call, "Not run.")
 
 
 #: Who is in the middle of naming a terminal: user id -> (terminal, deadline).
@@ -1522,6 +1558,31 @@ async def run_command(message: Message, bot: Bot) -> None:
         # No active machine: show the list and let them pick.
         await show_machines(bot, message.chat.id, user_id)
         return
+
+    # A handful of commands are held back for one confirmation. In a chat the
+    # usual safeguards are missing: messages go to the wrong chat, the terminal
+    # answering is not always the one on screen, and on a phone commands get
+    # reused by editing an old message.
+    if not _confirmed.pop(user_id, False):
+        danger = looks_destructive(text)
+        if danger is not None:
+            _PENDING[user_id] = (text, time.monotonic() + CONFIRM_WINDOW)
+            kb = InlineKeyboardBuilder()
+            kb.button(text="Run it", callback_data="runyes",
+                      style=ButtonStyle.DANGER)
+            kb.button(text="Cancel", callback_data="runno")
+            kb.adjust(2)
+
+            everything = ("\n\n⚠️ <b>This points at the whole machine.</b> "
+                          "Nothing on it would survive."
+                          if hits_everything(text) else "")
+            await message.answer(
+                f"This would <b>{danger.what}</b> on "
+                f"<b>{html.escape(host.name)}</b>.\n"
+                f"<i>{danger.lost}</i>{everything}\n\n"
+                f"<pre>{html.escape(text)}</pre>",
+                parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+            return
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 

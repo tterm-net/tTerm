@@ -20,6 +20,7 @@ messages.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import secrets
 import time
@@ -39,6 +40,8 @@ from .config import config
 from .db import Host
 
 # Sequences entering and leaving the alternate screen (htop, vim, less).
+log = logging.getLogger("tterm.ssh")
+
 ALT_SCREEN_ENTER = re.compile(rb"\x1b\[\?(?:1049|47|1047)h")
 ALT_SCREEN_EXIT = re.compile(rb"\x1b\[\?(?:1049|47|1047)l")
 
@@ -67,7 +70,7 @@ class ShellSession(TerminalSession):
             port=self.host.ssh_port,
             username=self.host.ssh_user,
             client_keys=[(client_key, cert)],
-            known_hosts=None,  # TODO: pin the host key at registration time
+            known_hosts=self._pinned_key(),
             keepalive_interval=30,
             keepalive_count_max=3,
             connect_timeout=15,
@@ -281,6 +284,44 @@ class ShellSession(TerminalSession):
         except asyncio.TimeoutError:
             pass
         return _decode(bytes(buf))
+
+    def _pinned_key(self):
+        """The host key recorded when the machine was registered.
+
+        The install script reads /etc/ssh/ssh_host_ed25519_key.pub and sends it
+        along, so we know what the machine looked like at the moment its owner
+        confirmed it. Checking against that is the whole point: without it,
+        anything answering on that address gets our certificate — an address
+        can change hands, and DNS can be pointed elsewhere.
+
+        Returning None means "accept anything", which is what happens for
+        machines registered before this check existed. Refusing them instead
+        would lock people out of servers that work; the key is recorded on the
+        next re-registration.
+        """
+        if not self.host.host_pubkey:
+            log.info("No pinned key for host=%s — accepting whatever answers",
+                     self.host.id)
+            return None
+        # The key is parsed on its own first. import_known_hosts swallows
+        # nonsense and hands back an entry holding no keys at all — which does
+        # not mean "accept anything", it means "reject everything". A record
+        # damaged on our side would lock someone out of their own server.
+        try:
+            asyncssh.import_public_key(self.host.host_pubkey)
+        except Exception:
+            log.warning("Pinned key for host=%s is unreadable, ignoring it",
+                        self.host.id, exc_info=True)
+            return None
+
+        try:
+            return asyncssh.import_known_hosts(
+                f"[{self.host.ip}]:{self.host.ssh_port} {self.host.host_pubkey}\n"
+            )
+        except Exception:
+            log.warning("Could not build a known-hosts entry for host=%s",
+                        self.host.id, exc_info=True)
+            return None
 
     @property
     def is_alive(self) -> bool:

@@ -1477,6 +1477,102 @@ async def test_terminals() -> None:
     check("one live session per terminal", "key = terminal_id" in manager)
 
 
+async def test_dangerous_commands() -> None:
+    """Commands worth one question before they run."""
+    print("\nDestructive commands")
+    from tterm.core.danger import hits_everything, looks_destructive
+
+    # Things that leave nothing to fix afterwards.
+    for cmd in ("rm -rf /var/log/old", "rm -fr build",
+                "sudo rm -rf node_modules", "mkfs.ext4 /dev/sdb1",
+                "dd if=/dev/zero of=/dev/sda bs=1M",
+                "psql -c 'DROP DATABASE prod'", "shutdown -h now", "reboot",
+                "systemctl stop sshd", "userdel deploy", "ufw deny 22"):
+        check(f"asks about: {cmd[:34]}", looks_destructive(cmd) is not None, cmd)
+
+    # Everyday work must go through untouched. A bot that asks about
+    # everything teaches people to confirm without reading, which is worse
+    # than not asking at all.
+    for cmd in ("rm file.txt", "ls -la", "git reset --hard", "cd /tmp && ls",
+                "docker ps", "grep -r pattern .", "systemctl restart tterm",
+                "cat /etc/passwd", "rmdir empty", "df -h", "rm -i old.log"):
+        check(f"stays quiet on: {cmd[:34]}", looks_destructive(cmd) is None, cmd)
+
+    check("a delete aimed at everything is called out",
+          hits_everything("rm -rf /") and hits_everything("rm -rf ~")
+          and hits_everything("rm -rf $HOME"))
+    check("but an ordinary path is not",
+          not hits_everything("rm -rf /var/log/old"))
+
+    handlers = (pathlib.Path(__file__).resolve().parents[1]
+                / "bot" / "handlers.py").read_text("utf-8")
+    check("the command is held until confirmed", "_PENDING[user_id]" in handlers)
+    check("the confirmation expires", "CONFIRM_WINDOW" in handlers,
+          "a forgotten question must not fire an hour later")
+    check("confirming does not ask again", "_confirmed.pop(user_id" in handlers)
+    check("the command text is kept out of the button",
+          'callback_data="runyes"' in handlers,
+          "callback data is capped at 64 bytes, commands are not")
+
+
+async def test_host_key_pinning() -> None:
+    """The server has to be the one we registered, not just something at that
+    address."""
+    print("\nHost key")
+    import asyncssh
+    from tterm.core.ssh_session import ShellSession
+
+    uid = 700700
+    await db.upsert_user(uid, "pin", "Pin")
+    real = asyncssh.generate_private_key("ssh-ed25519")
+    pub = real.export_public_key().decode().strip()
+
+    hid = await db.create_pending_host(uid, name="pinned", ip="10.20.30.40",
+                                       ssh_port=22, host_pubkey=pub)
+    await db.activate_host(hid)
+    host = await db.get_host(hid)
+    check("the key survives the round trip through the database",
+          host.host_pubkey == pub)
+
+    session = ShellSession(host)
+    known = session._pinned_key()
+    check("a pinned key becomes a known-hosts entry", known is not None)
+
+    # Machines registered before this check existed have no key. Refusing them
+    # would lock people out of servers that work; the key is recorded the next
+    # time they re-register.
+    bare = await db.create_pending_host(uid, name="legacy", ip="10.20.30.41")
+    await db.activate_host(bare)
+    check("a machine without a key still connects",
+          ShellSession(await db.get_host(bare))._pinned_key() is None,
+          "otherwise an upgrade locks people out of working servers")
+
+    # A broken record is ours to fix, and must not stand between someone and
+    # their server.
+    broken = await db.create_pending_host(uid, name="broken", ip="10.20.30.42",
+                                          host_pubkey="not-a-key at all")
+    await db.activate_host(broken)
+    import logging as _lg
+    _lg.getLogger("tterm.ssh").setLevel(_lg.CRITICAL)   # ожидаемая жалоба
+    check("an unreadable record is ignored, not fatal",
+          ShellSession(await db.get_host(broken))._pinned_key() is None,
+          "asyncssh turns nonsense into an entry with no keys, which rejects "
+          "everything — that would lock the owner out")
+    _lg.getLogger("tterm.ssh").setLevel(_lg.WARNING)
+
+    check("the key itself is validated first",
+          "import_public_key" in (pathlib.Path(__file__).resolve().parents[1]
+                                  / "core" / "ssh_session.py").read_text("utf-8"))
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "core" / "ssh_session.py").read_text("utf-8")
+    check("the connection actually checks it",
+          "known_hosts=self._pinned_key()" in src)
+    check("nothing accepts every key any more",
+          "known_hosts=None," not in src,
+          "that was the hole: anything answering on the address got our cert")
+
+
 async def test_shutdown() -> None:
     """Shutdown must not hang the process.
 
@@ -1600,6 +1696,8 @@ async def main() -> int:
     await test_terminals()
     await test_output_thresholds()
     await test_live_output()
+    await test_dangerous_commands()
+    await test_host_key_pinning()
     await test_shutdown()
     await test_resilience()
     test_rendering()

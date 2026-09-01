@@ -124,6 +124,9 @@ class Host:
     status: str
     last_seen: int | None
     kind: str = "ssh"
+    #: The server's own key as it was when the machine was registered. Used to
+    #: refuse anything else answering on that address later.
+    host_pubkey: str | None = None
 
     @classmethod
     def from_row(cls, row: aiosqlite.Row) -> "Host":
@@ -136,6 +139,7 @@ class Host:
             ssh_port=row["ssh_port"],
             ssh_user=row["ssh_user"],
             os_info=row["os_info"],
+            host_pubkey=row["host_pubkey"] if "host_pubkey" in row.keys() else None,
             status=row["status"],
             last_seen=row["last_seen"],
             kind=row["kind"] if "kind" in row.keys() else "ssh",
