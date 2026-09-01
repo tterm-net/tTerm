@@ -1350,6 +1350,18 @@ async def test_terminals() -> None:
     # Selecting and showing the prompt belong together: kept apart, picking a
     # machine set the active host but left the active terminal alone, and the
     # prompt then described one window while commands went to another.
+    # Every way of landing somewhere has to end with a prompt — including the
+    # ones nobody asked for: closing a window drops you on a neighbour, and
+    # opening the list shows a machine already picked out.
+    check("opening the list shows where you are",
+          "async def show_machines_and_prompt" in handlers
+          and handlers.count("await show_machines_and_prompt(") >= 2,
+          "/use and /start both land on a selection")
+    check("closing a window announces the one you land on",
+          "await select_terminal(call.bot, call.message.chat.id, "
+          "call.from_user.id,\n                          host, "
+          "int(others[0][\"id\"]))" in handlers)
+
     check("choosing a terminal always shows its prompt",
           "async def select_terminal" in handlers
           and handlers.count("await select_terminal(") >= 4,

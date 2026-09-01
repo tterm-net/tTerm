@@ -150,6 +150,30 @@ async def show_screen(bot: Bot, chat_id: int, rich, call: CallbackQuery | None,
                                reply_markup=fallback_markup)
 
 
+async def show_machines_and_prompt(bot: Bot, chat_id: int, user_id: int) -> None:
+    """Draws the list and then says where you are.
+
+    Opening the list shows a machine already picked out; without the prompt
+    that selection is a claim with nothing behind it — you cannot tell whether
+    the session is alive or what directory it sits in.
+    """
+    await show_machines(bot, chat_id, user_id)
+
+    term = await db.get_active_terminal(user_id)
+    if term is not None:
+        host = await db.get_host(int(term["host_id"]))
+        if host is not None:
+            await send_prompt(bot, chat_id, user_id, host, int(term["id"]))
+        return
+
+    # A machine can be highlighted before any terminal exists: with a single
+    # machine the list picks it for you. The first window is created here so
+    # the highlight means something.
+    host = await db.get_active_host(user_id)
+    if host is not None:
+        await select_terminal(bot, chat_id, user_id, host)
+
+
 async def show_machines(bot: Bot, chat_id: int, user_id: int,
                         call: CallbackQuery | None = None) -> None:
     """Shows the machine list, as a new message or by editing the previous one.
@@ -471,10 +495,16 @@ async def cb_close_terminal(call: CallbackQuery) -> None:
 
     await sessions.drop(term_id)
     await db.close_terminal(term_id)
-    await db.set_active_terminal(call.from_user.id, int(others[0]["id"]))
     await call.answer("Terminal closed")
-    if call.message is not None:
-        await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
+
+    host = await db.get_host(host_id)
+    if call.message is None or host is None:
+        return
+    # Landing somewhere new is a selection like any other, and it was not
+    # asked for — all the more reason to say where you ended up.
+    await select_terminal(call.bot, call.message.chat.id, call.from_user.id,
+                          host, int(others[0]["id"]))
+    await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
 
 
 @router.callback_query(F.data.startswith("shares:"))
@@ -537,7 +567,7 @@ async def cmd_start(message: Message) -> None:
     await db.upsert_user(user.id, user.username, user.first_name)
 
     if await db.list_hosts(user.id):
-        await show_machines(message.bot, message.chat.id, user.id)
+        await show_machines_and_prompt(message.bot, message.chat.id, user.id)
         return
 
     rich = machines.screen(
@@ -848,7 +878,8 @@ async def cmd_use(message: Message) -> None:
         await cmd_addhost(message)
         return
 
-    await show_machines(message.bot, message.chat.id, message.from_user.id)
+    await show_machines_and_prompt(message.bot, message.chat.id,
+                                   message.from_user.id)
 
 
 async def select_terminal(bot: Bot, chat_id: int, user_id: int, host: Host,
