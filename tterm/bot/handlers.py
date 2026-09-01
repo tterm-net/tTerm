@@ -418,17 +418,14 @@ async def cb_new_terminal(call: CallbackQuery) -> None:
 
     await db.ensure_terminal(call.from_user.id, host_id)
     term_id = await db.open_terminal(call.from_user.id, host_id)
-    await db.set_active_terminal(call.from_user.id, term_id)
-    await db.set_active_host(call.from_user.id, host_id)
     await call.answer("Terminal opened")
 
-    if call.message is None:
-        return
-    await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
     host = await db.get_host(host_id)
-    if host is not None:
-        await send_prompt(call.bot, call.message.chat.id, call.from_user.id,
+    if call.message is None or host is None:
+        return
+    await select_terminal(call.bot, call.message.chat.id, call.from_user.id,
                           host, term_id)
+    await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
 
 
 @router.callback_query(F.data.startswith("term:"))
@@ -442,17 +439,14 @@ async def cb_pick_terminal(call: CallbackQuery) -> None:
         await call.answer("Terminal not found", show_alert=True)
         return
 
-    await db.set_active_terminal(call.from_user.id, term_id)
-    await db.set_active_host(call.from_user.id, int(term["host_id"]))
-    await call.answer(term["name"] or "(1)")
+    await call.answer()
 
-    if call.message is None:
-        return
-    await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
     host = await db.get_host(int(term["host_id"]))
-    if host is not None:
-        await send_prompt(call.bot, call.message.chat.id, call.from_user.id,
+    if call.message is None or host is None:
+        return
+    await select_terminal(call.bot, call.message.chat.id, call.from_user.id,
                           host, term_id)
+    await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
 
 
 @router.callback_query(F.data.startswith("closeterm:"))
@@ -815,7 +809,7 @@ async def cb_confirm(call: CallbackQuery) -> None:
         f"{SERVER_ICON} <b>{html.escape(host.name)}</b> connected",
     )
     # Same as picking a machine: show where we landed and warm up the session.
-    await send_prompt(call.bot, call.message.chat.id, call.from_user.id, host)
+    await select_terminal(call.bot, call.message.chat.id, call.from_user.id, host)
 
 
 @router.callback_query(F.data.startswith("reject:"))
@@ -855,6 +849,22 @@ async def cmd_use(message: Message) -> None:
         return
 
     await show_machines(message.bot, message.chat.id, message.from_user.id)
+
+
+async def select_terminal(bot: Bot, chat_id: int, user_id: int, host: Host,
+                          terminal_id: int | None = None) -> int:
+    """Makes a terminal the active one and always shows its prompt.
+
+    Selecting and showing belong together. Kept apart, they drifted: picking a
+    machine set the active host but left the active terminal alone, so the
+    prompt described one window while commands went to another.
+    """
+    if terminal_id is None:
+        terminal_id = await db.ensure_terminal(user_id, host.id)
+    await db.set_active_host(user_id, host.id)
+    await db.set_active_terminal(user_id, terminal_id)
+    await send_prompt(bot, chat_id, user_id, host, terminal_id)
+    return terminal_id
 
 
 async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host,
@@ -898,13 +908,11 @@ async def cb_use(call: CallbackQuery) -> None:
             or not await db.can_use(call.from_user.id, host_id)):
         await call.answer("Machine unavailable", show_alert=True)
         return
-    await db.set_active_host(call.from_user.id, host_id)
     await call.answer(f"{host.name} is active")
 
-    await show_machines(call.bot, call.message.chat.id if call.message
-                        else call.from_user.id, call.from_user.id, call)
-    if call.message is not None:
-        await send_prompt(call.bot, call.message.chat.id, call.from_user.id, host)
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    await select_terminal(call.bot, chat_id, call.from_user.id, host)
+    await show_machines(call.bot, chat_id, call.from_user.id, call)
 
 
 # ---------------------------------------------------------------- sharing
@@ -1488,8 +1496,9 @@ async def run_command(message: Message, bot: Bot) -> None:
     # want a second.
     terminal_row = await db.get_active_terminal(user_id)
     if terminal_row is None or int(terminal_row["host_id"]) != host.id:
-        terminal_id = await db.ensure_terminal(user_id, host.id)
-        await db.set_active_terminal(user_id, terminal_id)
+        # Picked for them — say which window this went to, or the answer
+        # arrives from a terminal they never chose.
+        terminal_id = await select_terminal(bot, message.chat.id, user_id, host)
     else:
         terminal_id = int(terminal_row["id"])
 

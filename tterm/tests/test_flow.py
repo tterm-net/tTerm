@@ -1016,9 +1016,11 @@ async def test_machines_view() -> None:
     btn = _m.copy("Copy command", cmd).model_dump(exclude_none=True, mode="json")
     # Confirming a server must end with the prompt, exactly like picking one:
     # otherwise there is no telling where you landed and the session stays cold.
+    # Confirming a server ends with a prompt, like picking one: otherwise
+    # there is no telling where you landed and the session stays cold.
     check("confirming a server shows the prompt",
-          handlers_all.count("send_prompt(") >= 3,
-          "one definition plus a call from cb_use and cb_confirm")
+          "await select_terminal(call.bot, call.message.chat.id, "
+          "call.from_user.id, host)" in handlers_all)
 
     # Button labels sit in one row only while they are short. Long ones wrap
     # and the screen turns into a stack.
@@ -1323,6 +1325,35 @@ async def test_terminals() -> None:
           "a number in brackets is what tells them apart")
     await db.close_terminal(extra)
     check("and to close one", "closeterm:" in handlers)
+
+    # One button in that slot, and the word matches what it will do: closing
+    # a spare window and taking the machine off the list are worlds apart.
+    async def slot(host_obj, viewer, term):
+        drawn = await machines.build([host_obj], host_obj, viewer,
+                                     {host_obj.id: True}, term)
+        rows = [b["text"]
+                for blk in drawn.model_dump(exclude_none=True, mode="json")["blocks"]
+                if blk["type"] == "buttons" for b in blk["buttons"]]
+        return [r for r in rows if r in ("Close", "Remove")]
+
+    solo = await db.get_host(hid)
+    only = int((await db.terminals_of(uid, hid))[0]["id"])
+    while len(await db.terminals_of(uid, hid)) > 1:
+        await db.close_terminal(int((await db.terminals_of(uid, hid))[-1]["id"]))
+    check("the last window offers Remove", await slot(solo, uid, only) == ["Remove"])
+    spare = await db.open_terminal(uid, hid)
+    check("a spare window offers Close", await slot(solo, uid, spare) == ["Close"])
+    check("never both at once",
+          len(await slot(solo, uid, spare)) == 1)
+    await db.close_terminal(spare)
+
+    # Selecting and showing the prompt belong together: kept apart, picking a
+    # machine set the active host but left the active terminal alone, and the
+    # prompt then described one window while commands went to another.
+    check("choosing a terminal always shows its prompt",
+          "async def select_terminal" in handlers
+          and handlers.count("await select_terminal(") >= 4,
+          "every path that selects has to go through it")
     check("commands go to the selected terminal",
           "terminal_id=terminal_id" in handlers)
     check("a terminal can be renamed from the list", "renameterm:" in handlers)

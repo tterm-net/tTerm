@@ -212,17 +212,22 @@ def _actions(host: Host, user_id: int, terminal_id: int | None,
     if terminal_id is not None:
         buttons.append(RichMessageButton(
             text="Rename", callback_data=f"renameterm:{terminal_id}"))
-        if total > 1:
-            buttons.append(RichMessageButton(
-                text="Close", style="danger",
-                callback_data=f"closeterm:{terminal_id}"))
 
-    # The rest is management, and only the owner has any: someone granted
-    # access can work on the machine but not dispose of it.
     if host.owner_id == user_id:
+        # Sharing is management, and only the owner has any: someone granted
+        # access can work on the machine but not dispose of it.
         buttons.append(RichMessageButton(
             text=f"Access ({len(shares)})" if shares else "Access",
             callback_data=f"shares:{host.id}"))
+
+    # One button, and the word changes with what it will do. Closing a spare
+    # window and taking the machine off the list are worlds apart, so the
+    # label has to say which one is about to happen.
+    if total > 1 and terminal_id is not None:
+        buttons.append(RichMessageButton(
+            text="Close", style="danger",
+            callback_data=f"closeterm:{terminal_id}"))
+    elif host.owner_id == user_id:
         buttons.append(RichMessageButton(text="Remove", style="danger",
                                          callback_data=f"askrm:{host.id}"))
     return InputRichBlockButtons(align="left", buttons=buttons)
