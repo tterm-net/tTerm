@@ -1482,6 +1482,51 @@ async def test_terminals() -> None:
     check("one live session per terminal", "key = terminal_id" in manager)
 
 
+async def test_reaper() -> None:
+    """The idle reaper has to run, not just exist."""
+    print("\nIdle reaper")
+    from tterm.core.config import config as cfg
+    from tterm.core.session_manager import sessions as pool
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "core" / "session_manager.py").read_text("utf-8")
+    check("the reaper does not unpack the session key",
+          "for user_id, host_id in stale" not in src,
+          "the key is a terminal id; unpacking it threw once a minute "
+          "for a week while no idle session was ever closed")
+    check("it drops by terminal id", "await self.drop(terminal_id)" in src)
+
+    handlers_reap = (pathlib.Path(__file__).resolve().parents[1]
+                     / "bot" / "handlers.py").read_text("utf-8")
+    # A fallback that catches one kind of failure is not a fallback: anything
+    # else escaped the function, and the person saw nothing while the log said
+    # nothing either.
+    check("the fallback covers every failure, not just Telegram's",
+          handlers_reap.count("falling back to plain") >= 4,
+          "two places, each with a Telegram branch and a catch-all")
+    check("and says so loudly enough to notice",
+          "log.warning(\"Could not show the list" not in handlers_reap
+          and handlers_reap.count('log.error("Rich') >= 4,
+          "a warning among a hundred info lines is invisible")
+
+    # The loop swallows its own exceptions so one bad tick cannot kill it,
+    # which is also why the fault went unseen. Run the body directly.
+    class Idle:
+        idle_seconds = 10_000
+        is_alive = True
+
+        async def close(self) -> None:
+            pass
+
+    pool._sessions[4242] = Idle()          # type: ignore[assignment]
+    stale = [key for key, s in pool._sessions.items()
+             if s.idle_seconds > cfg.SESSION_IDLE_SECONDS or not s.is_alive]
+    check("an idle session is spotted", 4242 in stale, str(stale))
+    for terminal_id in stale:
+        await pool.drop(terminal_id)
+    check("and closed", 4242 not in pool._sessions)
+
+
 async def test_short_paths() -> None:
     """A deep path is squeezed so the prompt stays on one line."""
     print("\nLong paths")
@@ -1820,6 +1865,7 @@ async def main() -> int:
     await test_terminals()
     await test_output_thresholds()
     await test_live_output()
+    await test_reaper()
     await test_short_paths()
     await test_condensed_caption()
     await test_dangerous_commands()

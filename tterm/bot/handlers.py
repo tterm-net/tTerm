@@ -141,7 +141,10 @@ async def show_screen(bot: Bot, chat_id: int, rich, call: CallbackQuery | None,
     except TelegramBadRequest as exc:
         if UNCHANGED in str(exc):
             return
-        log.warning("Rich screen was rejected, falling back to plain", exc_info=True)
+        log.error("Rich screen refused by Telegram, falling back to plain: %s",
+                  exc, exc_info=True)
+    except Exception:
+        log.error("Rich screen failed, falling back to plain", exc_info=True)
     if not fallback_text:
         return
     if call is not None:
@@ -206,8 +209,13 @@ async def show_machines(bot: Bot, chat_id: int, user_id: int,
     except TelegramBadRequest as exc:
         if UNCHANGED in str(exc):
             return
-        log.warning("Could not show the list as a rich message, "
-                    "falling back to plain", exc_info=True)
+        log.error("Rich list refused by Telegram, falling back to plain: %s",
+                  exc, exc_info=True)
+    except Exception:
+        # Anything else used to escape this function entirely: the person saw
+        # nothing at all and the log said nothing either. A fallback that only
+        # covers one kind of failure is not a fallback.
+        log.error("Rich list failed, falling back to plain", exc_info=True)
 
     text = await _servers_text(hosts, active, user_id)
     markup = servers_keyboard(hosts, active.id if active else None)

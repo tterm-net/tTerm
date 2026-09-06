@@ -171,10 +171,13 @@ class SessionManager:
                     for key, s in self._sessions.items()
                     if s.idle_seconds > config.SESSION_IDLE_SECONDS or not s.is_alive
                 ] if tick % self.IDLE_EVERY == 0 else []
-                for user_id, host_id in stale:
-                    log.info("Closing an idle session user=%s host=%s",
-                             user_id, host_id)
-                    await self.drop(user_id, host_id)
+                # The key is a terminal id, not a (user, host) pair. It was
+                # a pair until sessions moved to one per terminal, and this
+                # loop kept unpacking it — throwing once a minute, unnoticed,
+                # while no idle session was ever closed.
+                for terminal_id in stale:
+                    log.info("Closing an idle session terminal=%s", terminal_id)
+                    await self.drop(terminal_id)
 
                 # Expired shares: cut the session and warn both sides.
                 for row in await db.expire_shares():
