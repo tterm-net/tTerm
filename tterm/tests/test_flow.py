@@ -1351,6 +1351,16 @@ async def test_terminals() -> None:
                 for blk in drawn.model_dump(exclude_none=True, mode="json")["blocks"]
                 if blk["type"] == "buttons" for b in blk["buttons"]]
         seen.append([r for r in rows if r.startswith("Access")])
+    # Who a machine is open to used to show only in the old layout, so moving
+    # to the new one quietly dropped it. A machine shared and forgotten about
+    # is worth seeing without opening anything.
+    shared_view = await machines.build(
+        [await db.get_host(guest_host)], await db.get_host(guest_host), uid,
+        {guest_host: True}, own_a)
+    check("the list says who a machine is shared with",
+          "shared with" in shared_view.model_dump_json(),
+          shared_view.model_dump_json()[:200])
+
     check("every line offers the same sharing", seen[0] == seen[1] == ["Access (1)"],
           str(seen))
 
@@ -1504,6 +1514,20 @@ async def test_reaper() -> None:
     check("the fallback covers every failure, not just Telegram's",
           handlers_reap.count("falling back to plain") >= 4,
           "two places, each with a Telegram branch and a catch-all")
+    # The old keyboard belongs in the fallback and nowhere else. Removing a
+    # machine used to draw it by hand — left over from before the list was
+    # rebuilt — so nothing failed, nothing was logged, and the old buttons
+    # simply appeared.
+    import re as _re6
+    direct = []
+    for num, line in enumerate(handlers_reap.splitlines(), 1):
+        if "servers_keyboard(" not in line or line.lstrip().startswith("def "):
+            continue
+        around = "\n".join(handlers_reap.splitlines()[max(0, num - 7):num + 1])
+        if "falling back to plain" not in around:
+            direct.append(num)
+    check("the old keyboard is only ever the fallback", not direct, str(direct))
+
     check("and says so loudly enough to notice",
           "log.warning(\"Could not show the list" not in handlers_reap
           and handlers_reap.count('log.error("Rich') >= 4,

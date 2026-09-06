@@ -1306,13 +1306,19 @@ async def cb_remove(call: CallbackQuery) -> None:
     if host.kind == "agent":
         await db.revoke_agent_token(host_id)
     await db.remove_host(host_id)
+
+    # Straight back to the list in its normal form. This used to draw the old
+    # keyboard by hand — left over from before the list was rebuilt, and the
+    # one screen where the old buttons still showed up. Nothing failed and
+    # nothing was logged; it simply was the old code.
     hosts = await db.list_hosts(call.from_user.id)
-    if hosts:
-        await _replace(call, await _servers_text(hosts, None, call.from_user.id),
-                       servers_keyboard(hosts))
-    else:
+    if not hosts:
         await _replace(call, f"<b>{html.escape(host.name)}</b> removed. "
                              "No machines left — <code>/addhost</code>.")
+        return
+    if call.message is not None:
+        await show_machines_and_prompt(call.bot, call.message.chat.id,
+                                       call.from_user.id)
 
 
 @router.callback_query(F.data.startswith("reset:"))

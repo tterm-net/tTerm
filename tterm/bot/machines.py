@@ -150,12 +150,25 @@ async def build(hosts: list[Host], active: Host | None, user_id: int,
     blocks: list = [InputRichBlockParagraph(text=[RichTextBold(text=TITLE)])]
 
     for h in hosts:
-        tail = h.ip or ("computer" if h.kind == "agent" else "—")
+        tail = h.ip or ("computer" if h.kind == "agent" else "\u2014")
         if h.owner_id != user_id:
             owner = await db.username_of(h.owner_id) or "its owner"
             tail = f"from {owner}"
         elif not _reachable(h, online.get(h.id, False)):
             tail = "offline"
+        else:
+            # Who the machine is open to belongs on the line itself. It was
+            # only in the old layout, so switching to this one quietly dropped
+            # it — and a machine you have shared and forgotten about is worth
+            # seeing without opening anything.
+            shares = await db.shares_of(h.id)
+            if shares:
+                who = ", ".join(
+                    f"@{s['username']}" if s["username"]
+                    else (s["first_name"] or "someone") for s in shares[:2])
+                if len(shares) > 2:
+                    who += f" +{len(shares) - 2}"
+                tail = f"{tail} · shared with {who}" if tail else f"shared with {who}"
 
         # A machine can carry several terminals, the way you keep more than one
         # window open on a server. Each gets its own line: switching to one is
