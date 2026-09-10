@@ -1213,6 +1213,29 @@ async def test_live_output() -> None:
     check("output that keeps growing is not a question",
           growing.pending_prompt(now=growing.last_change + 5) is None)
 
+    # A long-running server prints once and then says nothing for hours. The
+    # rendered text still differs every time, because the elapsed time is part
+    # of it — so the card repainted twice a second to advance a clock.
+    from tterm.core.live import QUIET_REDRAW
+    quiet = LiveOutput()
+    quiet.feed("Uvicorn running on http://127.0.0.1:8000\n")
+    quiet.last_draw = 0.0
+    check("new output redraws promptly",
+          quiet.should_draw(True, now=DRAFT_INTERVAL + 0.1))
+    check("but a ticking clock alone does not",
+          not quiet.should_draw(False, now=DRAFT_INTERVAL + 0.1),
+          "repainting for a timer makes the chat flicker")
+    check("though the clock is not frozen either",
+          quiet.should_draw(False, now=QUIET_REDRAW + 0.1))
+    check("quiet redraws are far rarer than busy ones",
+          QUIET_REDRAW > DRAFT_INTERVAL * 5)
+
+    handlers_live = (pathlib.Path(__file__).resolve().parents[1]
+                     / "bot" / "handlers.py").read_text("utf-8")
+    check("the decision is made on the output, not the rendered card",
+          "changed = partial != live.text" in handlers_live
+          and "live.should_draw(changed)" in handlers_live)
+
     check("the draft is refreshed several times a second",
           DRAFT_INTERVAL < _cfg.STREAM_EDIT_INTERVAL,
           "drafts are made for streaming, plain edits were not")

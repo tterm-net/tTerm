@@ -1637,12 +1637,16 @@ async def run_command(message: Message, bot: Bot) -> None:
         # changed. Stamping it on every call — and on_progress fires on a
         # timer, not on new output — meant the output never looked quiet,
         # so a command waiting for an answer was never noticed.
+        changed = partial != live.text
         live.feed(partial[len(live.text):] if partial.startswith(live.text)
                   else partial)
 
         rendered = render_running(partial, time.perf_counter() - started,
                                   lang=detect_lang(text), state=running_state)
-        if rendered == last_rendered or not live.should_draw():
+        # The rendered text always differs, because the elapsed time is part
+        # of it. Whether the *output* changed is the thing that decides how
+        # eagerly to repaint.
+        if rendered == last_rendered or not live.should_draw(changed):
             return
         last_rendered = rendered
         live.drawn()

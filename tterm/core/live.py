@@ -32,6 +32,12 @@ from dataclasses import dataclass, field
 #: can be tighter than the 1.5s an ordinary message edit needed.
 DRAFT_INTERVAL = 0.7
 
+#: How often the card is refreshed when nothing new has been printed. The only
+#: thing moving then is the clock, and a message repainting twice a second to
+#: advance a timer is noise — especially for something like a running server,
+#: which prints once at startup and then stays quiet for hours.
+QUIET_REDRAW = 6.0
+
 #: How long the output has to stay completely still before a trailing prompt
 #: is treated as a question rather than a line that is still being written.
 QUIET_BEFORE_PROMPT = 2.0
@@ -108,17 +114,23 @@ class LiveOutput:
     def elapsed(self) -> float:
         return time.monotonic() - self.started
 
-    def should_draw(self, now: float | None = None) -> bool:
+    def should_draw(self, changed: bool = True,
+                    now: float | None = None) -> bool:
         """Whether the card is worth refreshing.
 
-        Once a question has been announced the card stops ticking: the output
+        Two different reasons to redraw, and they deserve different rates. New
+        output should appear promptly. A clock ticking beside output that has
+        not moved is not news, and repainting for it makes the chat flicker.
+
+        Once a question has been announced the card stops entirely: the output
         is not moving, and a timer counting up next to a repeat of the same
         question only makes the screen busier.
         """
         if self.announced is not None:
             return False
         now = time.monotonic() if now is None else now
-        return now - self.last_draw >= DRAFT_INTERVAL
+        gap = now - self.last_draw
+        return gap >= (DRAFT_INTERVAL if changed else QUIET_REDRAW)
 
     def drawn(self, now: float | None = None) -> None:
         self.last_draw = time.monotonic() if now is None else now
