@@ -1547,7 +1547,6 @@ async def test_output_cap() -> None:
 async def test_zsh() -> None:
     """The marker has to work in zsh, macOS's default shell since 2019."""
     print("\nzsh")
-    import re as _re_z
     import shutil
     import subprocess
     from tterm.core.formatter import (BOOTSTRAP, BOOTSTRAP_ZSH, bootstrap_for,
@@ -1573,6 +1572,16 @@ async def test_zsh() -> None:
         ('${PWD/#$HOME/~}', "the escaped form bash needs prints literally here"),
     ):
         check(f"zsh bootstrap has: {needed[:34]}", needed in BOOTSTRAP_ZSH, why)
+
+    # On macOS the base PATH comes from path_helper, run by the profile files
+    # that only a login shell reads. Taking it here means a tool in
+    # /usr/local/bin is found without touching how the shell starts.
+    for name, boot in (("bash", BOOTSTRAP), ("zsh", BOOTSTRAP_ZSH)):
+        check(f"{name} picks up the system PATH",
+              "path_helper" in boot,
+              "otherwise half the person's tools are missing on macOS")
+        check(f"{name} guards it for machines without one",
+              "[ -x /usr/libexec/path_helper ]" in boot)
 
     check("echo is switched off after the line editor, not before",
           BOOTSTRAP_ZSH.strip().splitlines()[-1].startswith("stty -echo"),
@@ -1614,6 +1623,17 @@ async def test_zsh() -> None:
               'else "/bin/bash"' in a)
         check("no --noediting for zsh, it has no such flag",
               'if "zsh" in os.path.basename(shell):' in a)
+        # macOS assembles the base PATH in /etc/zprofile, which only a login
+        # shell reads. Without this the person's own additions show up and
+        # /usr/local/bin does not, so half their tools go missing for no
+        # visible reason.
+        # Not a login shell: that was tried and broke the marker on macOS in
+        # a way that could not be reproduced anywhere else. The system PATH is
+        # taken directly in the bootstrap instead — the same thing a login
+        # shell would have done, without changing how the shell starts.
+        check("the shell is not started as a login shell",
+              '"-l"' not in a,
+              "it broke the marker on macOS and the cause was never found")
     else:
         print("  · tterm-agent рядом не найден, сверка пропущена")
 
@@ -1627,9 +1647,11 @@ async def test_zsh() -> None:
           'shell=(hello.get("shell") or "bash")' in api,
           "an older agent says nothing and keeps bash")
 
-    # Any non-zero will do: GNU ls exits 2 on a missing path, BSD ls exits 1,
-    # and the point is that the code survives the marker, not what it is.
-    codes = _re_z.findall(r"\x1eTESTN0NCE\x1e(\d+)\x1e", out)
+    # Any non-zero will do. GNU ls exits 2 on a missing path, BSD ls on macOS
+    # exits 1, and the point is that the code survives the marker at all —
+    # not which number the system chose.
+    import re as _re_code
+    codes = _re_code.findall(r"\x1eTESTN0NCE\x1e(\d+)\x1e", out)
     check("a failure still reports its code",
           any(c != "0" for c in codes), f"codes seen: {codes}")
 

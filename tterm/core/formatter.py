@@ -181,6 +181,7 @@ __tt_prompt() {
     "${VIRTUAL_ENV##*/}" "$b"
 }
 PROMPT_COMMAND=__tt_prompt
+[ -x /usr/libexec/path_helper ] && eval "$(/usr/libexec/path_helper -s)"
 PAGER=cat
 SYSTEMD_PAGER=
 GIT_PAGER=cat
@@ -219,6 +220,7 @@ __tt_prompt() {
     "${VIRTUAL_ENV##*/}" "$b"
 }
 precmd_functions+=(__tt_prompt)
+[ -x /usr/libexec/path_helper ] && eval "$(/usr/libexec/path_helper -s)"
 PAGER=cat
 SYSTEMD_PAGER=
 GIT_PAGER=cat
