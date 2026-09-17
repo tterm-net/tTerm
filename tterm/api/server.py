@@ -187,6 +187,7 @@ async def agent_socket(ws: WebSocket) -> None:
         link = AgentLink(
             host_id=host.id, owner_id=host.owner_id, name=host.name,
             os_info=hello.get("os", ""), version=hello.get("agent", ""),
+            shell=(hello.get("shell") or "bash"),
             send=send,
         )
         registry.attach(link)

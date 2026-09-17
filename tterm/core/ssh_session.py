@@ -31,6 +31,7 @@ from .ca import ca
 from .formatter import BOOTSTRAP, parse_marker
 from .session_base import (
     IDLE_HINT_AFTER,
+    MAX_LIVE_BYTES,
     Block,
     IdleCallback,
     ProgressCallback,
@@ -222,6 +223,14 @@ class ShellSession(TerminalSession):
 
             if chunk:
                 buf.extend(chunk)
+                # Drop the head as it arrives rather than at render time: a
+                # command that never stops printing would otherwise hold
+                # everything it ever wrote in memory. The marker lives at the
+                # end, so the tail is the part we cannot lose.
+                if len(buf) > MAX_LIVE_BYTES:
+                    del buf[:-MAX_LIVE_BYTES]
+                    if block:
+                        block.truncated = True
                 last_output = time.monotonic()
                 if ALT_SCREEN_ENTER.search(chunk):
                     self.in_alt_screen = True

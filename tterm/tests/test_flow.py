@@ -1515,6 +1515,125 @@ async def test_terminals() -> None:
     check("one live session per terminal", "key = terminal_id" in manager)
 
 
+async def test_output_cap() -> None:
+    """Endless output must not fill memory."""
+    print("\nMemory")
+    from tterm.core.session_base import MAX_LIVE_BYTES
+
+    check("there is a cap at all", 1_000_000 <= MAX_LIVE_BYTES <= 20_000_000,
+          f"{MAX_LIVE_BYTES} bytes")
+
+    # Trimming at render time is too late: `yes` fills memory as fast as the
+    # machine can print until the command times out. The head has to go while
+    # the output is still arriving.
+    for mod in ("ssh_session", "agent_hub"):
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "core" / f"{mod}.py").read_text("utf-8")
+        check(f"{mod} caps the buffer as it reads",
+              "len(buf) > MAX_LIVE_BYTES" in src)
+        # Written two ways because the buffers differ: a bytearray over SSH,
+        # a str from the agent. Both keep the tail.
+        check(f"{mod} drops the head, not the tail",
+              "buf[-MAX_LIVE_BYTES:]" in src or "del buf[:-MAX_LIVE_BYTES]" in src,
+              "the marker is at the end; losing it loses the whole command")
+        check(f"{mod} says the output was cut",
+              "block.truncated = True" in src)
+
+    check("the cap is below what a message or file can hold",
+          MAX_LIVE_BYTES >= 2_000_000,
+          "cutting tighter than the file limit would lose visible output")
+
+
+async def test_zsh() -> None:
+    """The marker has to work in zsh, macOS's default shell since 2019."""
+    print("\nzsh")
+    import re as _re_z
+    import shutil
+    import subprocess
+    from tterm.core.formatter import (BOOTSTRAP, BOOTSTRAP_ZSH, bootstrap_for,
+                                      parse_marker)
+
+    check("zsh gets its own bootstrap",
+          bootstrap_for("/bin/zsh") is BOOTSTRAP_ZSH
+          and bootstrap_for("/usr/local/bin/zsh") is BOOTSTRAP_ZSH)
+    check("everything else still gets bash",
+          bootstrap_for("/bin/bash") is BOOTSTRAP
+          and bootstrap_for(None) is BOOTSTRAP
+          and bootstrap_for("/usr/bin/fish") is BOOTSTRAP)
+
+    # Each of these lines is here because leaving it out broke something
+    # visible, and the reason is worth keeping next to the line.
+    for needed, why in (
+        ("setopt interactive_comments",
+         "zsh runs a comment as a command otherwise"),
+        ("unsetopt PROMPT_SP", "an inverse % lands in the middle of the output"),
+        ("unsetopt zle", "the line editor echoes the command back"),
+        ("stty -echo", "and it re-enables terminal echo, so this goes last"),
+        ("precmd_functions+=", "appending, not replacing: oh-my-zsh uses it too"),
+        ('${PWD/#$HOME/~}', "the escaped form bash needs prints literally here"),
+    ):
+        check(f"zsh bootstrap has: {needed[:34]}", needed in BOOTSTRAP_ZSH, why)
+
+    check("echo is switched off after the line editor, not before",
+          BOOTSTRAP_ZSH.strip().splitlines()[-1].startswith("stty -echo"),
+          "zle turns terminal echo back on when it starts")
+
+    # The one that matters: a real zsh, driven the way the bot drives it.
+    if not shutil.which("zsh"):
+        print("  · zsh не установлен, живая проверка пропущена")
+        return
+
+    script = "\n".join([
+        "stty -echo 2>/dev/null; PS1=''; PS2=''; PS4=''",
+        "__TT_NONCE=TESTN0NCE",
+        BOOTSTRAP_ZSH.strip("\n"),
+        "echo hello-from-zsh",
+        "cd /tmp",
+        "ls /definitely-not-here",
+        "exit",
+    ])
+    out = subprocess.run(["zsh", "-f", "-i", "-s"], input=script, text=True,
+                         capture_output=True, timeout=30).stdout
+    first = parse_marker(out, "TESTN0NCE")
+    check("a real zsh produces a marker we can read", first is not None)
+    if first:
+        body, state, code = first
+        check("and the output comes through clean",
+              "hello-from-zsh" in body and "echo hello" not in body,
+              repr(body[:60]))
+    # The bot only knows which marker to send because the agent says so in
+    # its hello. Three links in that chain, and a break in any one of them
+    # silently falls back to bash.
+    agent_src = pathlib.Path(__file__).resolve().parents[3] / "tterm-agent" / "agent.py"
+    if agent_src.exists():
+        a = agent_src.read_text("utf-8")
+        check("the agent runs the person's own shell",
+              'KNOWN = ("bash", "zsh")' in a)
+        check("and tells the bot which one", '"shell": os.path.basename' in a)
+        check("falling back to bash for anything else",
+              'else "/bin/bash"' in a)
+        check("no --noediting for zsh, it has no such flag",
+              'if "zsh" in os.path.basename(shell):' in a)
+    else:
+        print("  · tterm-agent рядом не найден, сверка пропущена")
+
+    hub = (pathlib.Path(__file__).resolve().parents[1]
+           / "core" / "agent_hub.py").read_text("utf-8")
+    check("the hub carries the shell to the bootstrap",
+          "shell: str" in hub and "bootstrap_for(link.shell)" in hub)
+    api = (pathlib.Path(__file__).resolve().parents[1]
+           / "api" / "server.py").read_text("utf-8")
+    check("and the hello is where it comes from",
+          'shell=(hello.get("shell") or "bash")' in api,
+          "an older agent says nothing and keeps bash")
+
+    # Any non-zero will do: GNU ls exits 2 on a missing path, BSD ls exits 1,
+    # and the point is that the code survives the marker, not what it is.
+    codes = _re_z.findall(r"\x1eTESTN0NCE\x1e(\d+)\x1e", out)
+    check("a failure still reports its code",
+          any(c != "0" for c in codes), f"codes seen: {codes}")
+
+
 async def test_reaper() -> None:
     """The idle reaper has to run, not just exist."""
     print("\nIdle reaper")
@@ -1912,6 +2031,8 @@ async def main() -> int:
     await test_terminals()
     await test_output_thresholds()
     await test_live_output()
+    await test_output_cap()
+    await test_zsh()
     await test_reaper()
     await test_short_paths()
     await test_condensed_caption()

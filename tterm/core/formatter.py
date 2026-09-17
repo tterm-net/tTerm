@@ -188,6 +188,58 @@ DEBIAN_FRONTEND=noninteractive
 export PAGER SYSTEMD_PAGER GIT_PAGER DEBIAN_FRONTEND
 """
 
+#: The same marker for zsh, which macOS has used by default since 2019.
+#:
+#: Written out separately rather than patched together from the bash one: the
+#: two differ in enough small ways that a shared template would hide the
+#: differences instead of explaining them.
+BOOTSTRAP_ZSH = r"""
+setopt interactive_comments 2>/dev/null
+unsetopt PROMPT_SP PROMPT_CR PROMPT_EOL_MARK 2>/dev/null
+unsetopt zle 2>/dev/null
+: "${__TT_GIT_DIRTY:=1}"
+__TT_USER="${USER:-${LOGNAME:-}}"
+[ -n "$__TT_USER" ] || __TT_USER="$(id -un 2>/dev/null)"
+__TT_HOST="${HOST:-}"
+[ -n "$__TT_HOST" ] || __TT_HOST="$(hostname -s 2>/dev/null)"
+__tt_prompt() {
+  local e=$?
+  local b= d="$PWD" h= g=
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    if [ -r "$d/.git/HEAD" ]; then read -r h < "$d/.git/HEAD"; b="${h##*/}"; g="$d"; break; fi
+    d="${d%/*}"
+  done
+  if [ -n "$b" ] && [ "$__TT_GIT_DIRTY" = 1 ]; then
+    local st=
+    st=$(cd "$g" 2>/dev/null && git --no-optional-locks status --porcelain -uno 2>/dev/null)
+    [ -n "$st" ] && b="$b*"
+  fi
+  printf '\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e\x1f' \
+    "$__TT_NONCE" "$e" "${PWD/#$HOME/~}" "$__TT_USER" "$EUID" "$__TT_HOST" \
+    "${VIRTUAL_ENV##*/}" "$b"
+}
+precmd_functions+=(__tt_prompt)
+PAGER=cat
+SYSTEMD_PAGER=
+GIT_PAGER=cat
+DEBIAN_FRONTEND=noninteractive
+export PAGER SYSTEMD_PAGER GIT_PAGER DEBIAN_FRONTEND
+stty -echo 2>/dev/null
+"""
+
+
+def bootstrap_for(shell: str | None) -> str:
+    """The marker written for the shell on the other end.
+
+    Three differences make a shared template a bad idea. zsh runs comments as
+    commands unless told otherwise; it marks unfinished output with an inverse
+    '%' that lands in the middle of what we parse; and the escaped `\\~` that
+    bash needs comes out literally there, so the home directory would read as
+    a backslash and a tilde.
+    """
+    return BOOTSTRAP_ZSH if (shell or "").endswith("zsh") else BOOTSTRAP
+
+
 
 @dataclass
 class State:

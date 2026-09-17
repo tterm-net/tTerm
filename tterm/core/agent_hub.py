@@ -21,9 +21,10 @@ import time
 from dataclasses import dataclass, field
 
 from .config import config
-from .formatter import BOOTSTRAP, parse_marker
+from .formatter import bootstrap_for, parse_marker
 from .session_base import (
     IDLE_HINT_AFTER,
+    MAX_LIVE_BYTES,
     Block,
     IdleCallback,
     ProgressCallback,
@@ -45,6 +46,9 @@ class AgentLink:
     name: str
     os_info: str
     version: str
+    #: Which shell runs on that machine. The marker is written differently for
+    #: each, so this decides which bootstrap gets sent.
+    shell: str
     send: object  # async callable: (dict) -> None
     #: Everything the agent sent that we have not parsed yet.
     inbox: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
@@ -126,7 +130,8 @@ class AgentSession(TerminalSession):
             "export COLUMNS=100 LINES=40 LESS=FRX",
             f"__TT_NONCE={link.nonce}",
         ]
-        for line in prelude + BOOTSTRAP.strip("\n").split("\n"):
+        boot = bootstrap_for(link.shell)
+        for line in prelude + boot.strip("\n").split("\n"):
             await self._write(line + "\n")
             await asyncio.sleep(0.01)
 
@@ -204,6 +209,12 @@ class AgentSession(TerminalSession):
                 chunk = ""
             if chunk:
                 buf += chunk
+                # Same cap as over SSH: the head goes as it arrives, so a
+                # command that never stops printing cannot fill memory.
+                if len(buf) > MAX_LIVE_BYTES:
+                    buf = buf[-MAX_LIVE_BYTES:]
+                    if block:
+                        block.truncated = True
                 if ALT_SCREEN_ENTER.search(chunk):
                     self.in_alt_screen = True
                     if block:

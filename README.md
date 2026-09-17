@@ -10,31 +10,79 @@ comes back as a message with the exit code, the working directory and how long
 it took. The directory and environment variables are kept between messages,
 just like in a real terminal.
 
-Works with Linux servers over SSH and with macOS or Linux computers through
-a small [agent](https://github.com/tterm-net/tterm-agent).
+## One bot, any number of machines
 
-## How it works
+This is worth saying plainly, because the shape is not obvious: **you run one
+bot and connect as many machines to it as you like.** `/use` lists them,
+tapping one makes it active, and each can hold several terminals — separate
+shells on the same machine, the way you keep more than one window open.
 
-1. You run a single command on your server.
-2. It creates a separate user and trusts our certificate authority —
-   **without touching `sshd_config`**, so there is no way to lock yourself out.
+```
+                    ┌─ server web-01        ← SSH, certificate per connection
+  you ─ Telegram ─ bot ─ server db-02
+                    └─ laptop               ← agent dials out, no open ports
+```
+
+There is no bot per server, and nothing to install per machine beyond the
+one-line enrolment below.
+
+## How it connects
+
+**To a server: over SSH.** That is the transport, and it is ordinary SSH — the
+difference is only in how the key is handled.
+
+1. You run a single command on the server.
+2. It creates a separate user and adds trust for our certificate authority to
+   that user's `authorized_keys` — **without touching `sshd_config`**, so there
+   is no way to lock yourself out.
 3. That user gets passwordless sudo, otherwise the bot could not restart
    a service or read the system log.
-4. Every connection uses a fresh certificate valid for 15 minutes. We never
-   store your SSH keys.
+4. Every connection uses a freshly issued certificate valid for 15 minutes.
+   Nothing long-lived is stored: there is no private key of yours anywhere in
+   the system, and none is ever asked for.
+5. The server's own host key is recorded at enrolment and checked on every
+   connection afterwards.
 
-A laptop cannot be reached from the outside, so the direction is reversed
-there: a small agent opens the connection itself and keeps it alive. No port
-is ever opened on your machine.
+**To a computer: through an agent.** A laptop cannot be reached from the
+outside, so the direction is reversed: a small
+[agent](https://github.com/tterm-net/tterm-agent) opens the connection itself
+and keeps it alive. No port is ever opened on your machine, and SSH is not
+involved at all.
 
 ## What it can do
 
-- run commands and keep the shell state between messages;
-- show the exit code, duration, current directory, git branch and whether
-  the working tree is dirty;
-- send long output as a file instead of flooding the chat;
-- share a machine with someone else, with or without a time limit;
-- show the owner everything others ran on their machines.
+- run commands and keep the shell state between messages — `cd` in one message,
+  and the next one starts there;
+- several terminals per machine, each with its own shell;
+- show the exit code, duration, current directory, git branch and whether the
+  working tree is dirty;
+- stream the output as it arrives, with a Stop button that actually interrupts
+  the command;
+- notice a command that is waiting for an answer — `Username for`, `[y/N]` —
+  and offer buttons instead of hanging silently;
+- ask before something irreversible: `rm -rf`, `mkfs`, `DROP DATABASE`,
+  stopping `sshd`;
+- send long output as a file, with a summary in the caption rather than the
+  last few lines;
+- share a machine with someone else, with or without a time limit, and show
+  the owner everything they ran.
+
+**bash and zsh** are both supported. Full-screen programs — `htop`, `vim` —
+are only half-supported: the keys work, the screen is not redrawn.
+
+## What is in this repository
+
+| | |
+|---|---|
+| `tterm/core/` | sessions, the SSH and agent transports, the CA, the database |
+| `tterm/bot/` | everything you see in Telegram |
+| `tterm/api/` | the HTTP side: enrolment, the install script, the agent socket |
+| `tterm/templates/` | the install scripts handed to a server or a computer |
+| `tterm/tests/` | one file, run it against a real shell |
+
+The agent that runs on a computer lives in its own repository,
+[tterm-agent](https://github.com/tterm-net/tterm-agent) — it is a single file
+and is meant to be read before it is run.
 
 ## Security
 

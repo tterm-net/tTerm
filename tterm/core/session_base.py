@@ -24,6 +24,16 @@ from .formatter import State
 #: a false alarm costs nothing but a glance.
 IDLE_HINT_AFTER = 3.0
 
+#: The most output we hold in memory while a command runs. Beyond this the
+#: beginning is dropped as it arrives.
+#:
+#: Trimming only at render time — which is what happened before — means
+#: `yes` or `cat /dev/urandom` grows the buffer until the command times out,
+#: at whatever rate the machine can produce it. The file we send is trimmed
+#: from the top anyway, so dropping the head early changes nothing anyone
+#: sees and removes the growth.
+MAX_LIVE_BYTES = 4_000_000
+
 #: Called when the output has gone quiet for a while, so the bot can look at
 #: it and decide whether the command is waiting for an answer. Separate from
 #: on_progress because silence, not new output, is what makes it interesting.
