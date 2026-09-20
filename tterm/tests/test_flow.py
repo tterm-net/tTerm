@@ -1631,6 +1631,19 @@ async def test_zsh() -> None:
         # a way that could not be reproduced anywhere else. The system PATH is
         # taken directly in the bootstrap instead — the same thing a login
         # shell would have done, without changing how the shell starts.
+        # Closing an idle shell is about the shell, not about the link. The
+        # agent used to drop the whole connection on it, so every idle timeout
+        # took the machine out of the list for as long as reconnecting took.
+        check("an idle close keeps the connection",
+              "keeping the link" in a and "shell.restart()" in a,
+              "dropping the link here makes the machine blink offline")
+        check("the shell is replaced, not just stopped",
+              "def restart" in a and "self.generation += 1" in a)
+        check("the child is ended before its descriptor",
+              a.index("os.kill(self.pid, signal.SIGHUP)")
+              < a.index("os.close(self.fd)"),
+              "closing first leaves the reader blocked on a dead shell")
+
         check("the shell is not started as a login shell",
               '"-l"' not in a,
               "it broke the marker on macOS and the cause was never found")
