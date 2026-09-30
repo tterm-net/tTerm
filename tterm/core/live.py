@@ -46,6 +46,7 @@ QUIET_BEFORE_PROMPT = 2.0
 #: every entry here is a chance to interrupt a command that was doing fine.
 PROMPT_PATTERNS = [
     re.compile(r"\[[yY]/[nN]\]\s*[:?]?\s*$"),          # [y/N]
+    re.compile(r"\([yY]/[nN]\)\s*[:?]?\s*$"),          # (Y/n) — Node CLIs, wrangler
     re.compile(r"\([yY]es/[nN]o\)\s*[:?]?\s*$"),        # (yes/no)
     # The keyword may be far from the colon — `Username for 'https://host':`
     # has two of its own in the URL — so the line only has to end with one.
@@ -80,10 +81,41 @@ def looks_like_prompt(text: str) -> str | None:
     return None
 
 
+#: Questions that can only be a question. These are recognised even while the
+#: output is still moving — a spinner turning under `Continue? (Y/n)` keeps
+#: the output busy forever, and waiting for silence meant never noticing.
+#: Weaker shapes like `Password:` still need the output to settle first:
+#: that word turns up in ordinary output too.
+UNMISTAKABLE = [
+    re.compile(r"\[[yY]/[nN]\]"),
+    re.compile(r"\([yY]/[nN]\)"),
+    re.compile(r"\([yY]es/[nN]o\)"),
+]
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]|\r")
+
+
+def unmistakable_question(text: str, lines: int = 6) -> str | None:
+    """A yes/no question among the last few lines, even if more came after.
+
+    Interactive tools redraw a spinner or a progress line below the question,
+    so it is rarely the very last thing printed. Only the unmistakable shapes
+    are looked for here, so ordinary output does not trigger buttons.
+    """
+    if not text:
+        return None
+    recent = _ANSI.sub("", text).split("\n")[-lines:]
+    for line in reversed(recent):
+        line = line.strip()
+        if 0 < len(line) <= 200 and any(p.search(line) for p in UNMISTAKABLE):
+            return line
+    return None
+
+
 def is_yes_no(line: str) -> bool:
     """Whether the question can be answered with a single letter."""
     lowered = line.lower()
-    return "[y/n" in lowered or "(yes/no" in lowered or "[Y/n" in line
+    return ("[y/n" in lowered or "(y/n" in lowered or "(yes/no" in lowered)
 
 
 @dataclass
@@ -101,6 +133,11 @@ class LiveOutput:
     stopped: bool = False
     #: The prompt we have already told the person about, so we say it once.
     announced: str | None = None
+    #: The last question a message was sent about. Kept apart from
+    #: `announced`, which new output clears on purpose: a spinner below the
+    #: question produces new output every frame, and clearing this one with it
+    #: announced the same question over and over.
+    last_asked: str | None = None
 
     def feed(self, chunk: str) -> None:
         if not chunk:
@@ -142,9 +179,18 @@ class LiveOutput:
         not been finished yet would otherwise read as a question every time.
         """
         now = time.monotonic() if now is None else now
+
+        # A yes/no question is plain from its shape, and the output around it
+        # may never go quiet — so it does not wait.
+        clear = unmistakable_question(self.text)
+        if clear is None:
+            self.last_asked = None        # scrolled away: the next one counts
+        elif clear != self.last_asked:
+            return clear
+
         if now - self.last_change < QUIET_BEFORE_PROMPT:
             return None
         line = looks_like_prompt(self.text)
-        if line is None or line == self.announced:
+        if line is None or line in (self.announced, self.last_asked):
             return None
         return line

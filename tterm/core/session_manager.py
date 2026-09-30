@@ -20,11 +20,15 @@ log = logging.getLogger(__name__)
 
 class SessionManager:
     def __init__(self) -> None:
-        # (user_id, host_id) -> session
-        self._sessions: dict[tuple[int, int], TerminalSession] = {}
-        self._db_session_ids: dict[tuple[int, int], int] = {}
-        self._locks: dict[tuple[int, int], asyncio.Lock] = {}
+        # Keyed by terminal id since each terminal got its own shell; the
+        # comment used to say (user, host), which had not been true for weeks.
+        self._sessions: dict[int, TerminalSession] = {}
+        self._db_session_ids: dict[int, int] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
         self._reaper: asyncio.Task | None = None
+        #: Terminals with a command in flight. A message arriving for one of
+        #: these is input for that command, not a new command.
+        self._running: set[int] = set()
 
     def _lock_for(self, key: int) -> asyncio.Lock:
         if key not in self._locks:
@@ -59,6 +63,26 @@ class SessionManager:
             await db.touch_host(host.id)
             return session
 
+    def is_running(self, terminal_id: int) -> bool:
+        """Whether a command is running in this terminal right now."""
+        return terminal_id in self._running
+
+    async def feed(self, terminal_id: int, text: str) -> bool:
+        """Types a line into the command that is running, as a terminal would.
+
+        A message sent while a command runs belongs to that command: an answer
+        to `Continue? [y/N]`, a password, a line for a REPL. Running it as a
+        new command instead — which is what happened — sends `Y` to the shell
+        once the first one is over, where it means nothing.
+        """
+        if terminal_id not in self._running:
+            return False
+        session = self._sessions.get(terminal_id)
+        if session is None or not session.is_alive:
+            return False
+        await session.send_key((text + "\n").encode())
+        return True
+
     async def execute(
         self,
         user_id: int,
@@ -72,6 +96,15 @@ class SessionManager:
         session = await self.get_or_create(user_id, host, terminal_id)
         key = terminal_id
 
+        self._running.add(terminal_id)
+        try:
+            return await self._execute(session, user_id, host, command,
+                                       on_progress, terminal_id, on_idle, key)
+        finally:
+            self._running.discard(terminal_id)
+
+    async def _execute(self, session, user_id, host, command, on_progress,
+                       terminal_id, on_idle, key) -> Block:
         try:
             block = await session.run(command, on_progress=on_progress,
                                       on_idle=on_idle)
@@ -200,7 +233,10 @@ class SessionManager:
         if self._reaper:
             self._reaper.cancel()
         for key in list(self._sessions):
-            await self.drop(*key)
+            # The key is a terminal id. Unpacking it as a (user, host) pair —
+            # left over from before terminals — threw on every shutdown with
+            # a session open, which is to say on every deploy.
+            await self.drop(key)
 
 
 sessions = SessionManager()

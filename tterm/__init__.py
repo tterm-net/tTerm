@@ -1,3 +1,3 @@
 """tTerm — a terminal for your servers inside a Telegram chat."""
 
-__version__ = "0.39.2"
+__version__ = "0.40.0"

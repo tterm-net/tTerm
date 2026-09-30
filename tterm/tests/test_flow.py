@@ -942,12 +942,13 @@ async def test_machines_view() -> None:
     # Every screen must go through show_screen: it sends in-message buttons
     # and falls back to the plain layout only if Telegram refused them.
     import re as _re
-    # Four are allowed: two fallback branches inside _replace, the command
-    # output card that stays a plain message on purpose, and the one-question
-    # rename prompt, which needs a Cancel button and nothing else.
+    # Five are allowed: two fallback branches inside _replace, the command
+    # output card and the streaming card with its Stop button — both stay
+    # ordinary messages on purpose, since they are edited as output arrives —
+    # and the one-question rename prompt, which needs Cancel and nothing else.
     answers = _re.findall(r"\.answer\([^)]*reply_markup=", handlers_all)
     check("menus and screens do not send the old keyboard directly",
-          len(answers) <= 4, str(answers[:5]))
+          len(answers) <= 5, str(answers[:6]))
     # HTML tags are not parsed inside rich blocks and show up as literal text.
     # Check that none are fed into machines.para anywhere.
     import re as _re2
@@ -1242,11 +1243,18 @@ async def test_live_output() -> None:
 
     handlers = (pathlib.Path(__file__).resolve().parents[1]
                 / "bot" / "handlers.py").read_text("utf-8")
-    check("output streams into a draft", "send_message_draft" in handlers)
+    # Not a Telegram draft. One was tried: smoother, but while it is open the
+    # client treats the bot as still writing and holds back what the person
+    # types — so an answer to `Continue? (Y/n)` could not be sent until the
+    # command was over.
+    check("output streams into an ordinary message, not a draft",
+          "send_message_draft" not in handlers,
+          "a draft blocks the person from typing while the command runs")
     check("answer buttons go through the shared key handler",
           'callback_data=f"key:{host.id}:{answer}"' in handlers,
           "a private format would silently do nothing")
-    check("the draft carries a stop button", "can_stop=True" in handlers)
+    check("the streaming message carries its own stop button",
+          'text="Stop", callback_data=f"key:{host.id}:ctrl_c"' in handlers)
     check("the announcement is a real newline, not two characters",
           '\\\\n"' not in handlers.split("is waiting for an answer")[1][:40],
           "an over-escaped break shows up as \\n in the chat")
@@ -1259,9 +1267,10 @@ async def test_live_output() -> None:
           '"y": b"y\\n"' in handlers,
           "without it the program waits with the letter already typed")
 
-    check("editing a message remains as a fallback",
-          "Draft refused, streaming into a message instead" in handlers,
-          "an older client should still see progress")
+    # A message sent while a command runs is that command's input. Before,
+    # it waited and then ran on its own, as a command called `Y`.
+    check("a message during a command goes to its input",
+          "sessions.is_running(" in handlers and "sessions.feed(" in handlers)
 
 
 async def test_terminals() -> None:
@@ -1513,6 +1522,53 @@ async def test_terminals() -> None:
     manager = (pathlib.Path(__file__).resolve().parents[1]
                / "core" / "session_manager.py").read_text("utf-8")
     check("one live session per terminal", "key = terminal_id" in manager)
+
+
+async def test_input_while_running() -> None:
+    """A command that asks a question has to be able to get the answer."""
+    print("\nInput while running")
+    from tterm.core.live import LiveOutput, is_yes_no, unmistakable_question
+
+    # wrangler, npm and most Node tools ask with round brackets.
+    q = "? Would you like to create it? › (Y/n)"
+    check("round-bracket questions are recognised", is_yes_no(q))
+
+    # A spinner below the question keeps the output busy, so waiting for
+    # silence meant the question was never noticed at all.
+    spinning = q + "\n⠋ Uploading...\n⠙ Uploading...\n⠹ Uploading..."
+    check("a question is found above a spinner",
+          unmistakable_question(spinning) == q)
+    live = LiveOutput()
+    live.feed(spinning)
+    check("and announced without waiting for silence",
+          live.pending_prompt(now=live.last_change + 0.05) == q)
+
+    # ...but once. Every spinner frame is new output, and new output clears
+    # the "already announced" mark on purpose — which announced the same
+    # question twice a second until it was kept apart.
+    shown = 0
+    text = q + "\n"
+    again = LiveOutput()
+    for i in range(8):
+        text += f"⠋ frame {i}\n"
+        again.feed(text[len(again.text):])
+        found = again.pending_prompt(now=again.last_change + 0.05)
+        if found:
+            again.announced = again.last_asked = found
+            shown += 1
+    check("a spinning question is announced once", shown == 1, f"{shown} times")
+
+    check("ordinary output raises nothing",
+          unmistakable_question("Uploading 42 files\nDone in 3s") is None)
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "core" / "session_manager.py").read_text("utf-8")
+    check("the pool knows which terminals are busy",
+          "def is_running" in src and "self._running.discard" in src,
+          "and clears it in a finally, or one failure leaves it busy forever")
+    check("shutdown does not unpack the session key",
+          "drop(*key)" not in src,
+          "the key is a terminal id; unpacking it threw on every deploy")
 
 
 async def test_output_cap() -> None:
@@ -2066,6 +2122,7 @@ async def main() -> int:
     await test_terminals()
     await test_output_thresholds()
     await test_live_output()
+    await test_input_while_running()
     await test_output_cap()
     await test_zsh()
     await test_reaper()

@@ -10,6 +10,7 @@ tell whose output this is.
 """
 from __future__ import annotations
 
+import contextlib
 import html
 import logging
 import re
@@ -20,6 +21,7 @@ from aiogram.enums import ButtonStyle, ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
+    ReactionTypeEmoji,
     BufferedInputFile,
     CallbackQuery,
     Message,
@@ -1545,6 +1547,17 @@ async def run_command(message: Message, bot: Bot) -> None:
 
     user_id = message.from_user.id
 
+    # A command is already running here: this line is its input, the way
+    # typing into a terminal goes to whatever is in the foreground. Without
+    # this an answer to `Continue? (y/n)` waited until the command was over
+    # and then ran on its own, as a command called `Y`.
+    running = await db.get_active_terminal(user_id)
+    if running is not None and sessions.is_running(int(running["id"])):
+        if await sessions.feed(int(running["id"]), message.text):
+            with contextlib.suppress(Exception):
+                await message.react([ReactionTypeEmoji(emoji="👌")])
+            return
+
     # A pending rename claims this message. The window is short and the prompt
     # says so plainly, because a name swallowing a command would be worse than
     # a command swallowing a name.
@@ -1621,9 +1634,6 @@ async def run_command(message: Message, bot: Bot) -> None:
     running_state = State(host=label,
                           icon=PC_ICON if host.kind == "agent" else SERVER_ICON)
     live = LiveOutput()
-    # One draft per command. The id only has to be unique within the chat while
-    # the draft is open, and the message id we are answering is exactly that.
-    draft_id = message.message_id
 
     async def on_progress(partial: str) -> None:
         """Streams the output into a draft while the command is still running.
@@ -1641,6 +1651,10 @@ async def run_command(message: Message, bot: Bot) -> None:
         live.feed(partial[len(live.text):] if partial.startswith(live.text)
                   else partial)
 
+        # A yes/no question may sit above a spinner that never stops, so the
+        # silence on_idle waits for never comes. Check here as well.
+        await on_idle(partial)
+
         rendered = render_running(partial, time.perf_counter() - started,
                                   lang=detect_lang(text), state=running_state)
         # The rendered text always differs, because the elapsed time is part
@@ -1651,22 +1665,23 @@ async def run_command(message: Message, bot: Bot) -> None:
         last_rendered = rendered
         live.drawn()
 
-        try:
-            await bot.send_message_draft(
-                chat_id=message.chat.id, draft_id=draft_id, text=rendered,
-                parse_mode=ParseMode.HTML, can_stop=True)
-            return
-        except TelegramBadRequest:
-            # Older client, or drafts refused for this chat: fall back to the
-            # message we used to edit. Showing progress badly beats not at all.
-            log.debug("Draft refused, streaming into a message instead",
-                      exc_info=True)
-
+        # An ordinary message, edited in place — not a Telegram draft. A draft
+        # was tried and looked smoother, but while one is open the client
+        # treats the bot as still "writing" and holds back whatever the person
+        # types. A terminal has to take input while a command runs; that is
+        # the whole point of a prompt like `Continue? (y/n)`.
+        stop = InlineKeyboardBuilder()
+        stop.button(text="Stop", callback_data=f"key:{host.id}:ctrl_c",
+                    style=ButtonStyle.DANGER)
         try:
             if placeholder is None:
-                placeholder = await message.answer(rendered, parse_mode=ParseMode.HTML)
+                placeholder = await message.answer(
+                    rendered, parse_mode=ParseMode.HTML,
+                    reply_markup=stop.as_markup())
             else:
-                await placeholder.edit_text(rendered, parse_mode=ParseMode.HTML)
+                await placeholder.edit_text(
+                    rendered, parse_mode=ParseMode.HTML,
+                    reply_markup=stop.as_markup())
         except Exception:
             log.debug("Could not update the streaming message", exc_info=True)
 
@@ -1683,6 +1698,7 @@ async def run_command(message: Message, bot: Bot) -> None:
         if question is None:
             return
         live.announced = question
+        live.last_asked = question
 
         kb = InlineKeyboardBuilder()
         if is_yes_no(question):
