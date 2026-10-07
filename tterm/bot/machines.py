@@ -1,9 +1,10 @@
 """The machine list, built as a rich message.
 
 The machine name is a small button inside the line (`RichTextButton`).
-Tapping it makes the machine active and reveals its actions underneath:
-Access and Remove. The single tap stays with the main action while rare
-operations take no space until needed.
+Tapping it makes that line active. The actions for the active line sit in
+one row at the bottom of the list, above "+ Add a machine", and apply to
+whichever line is blue. They used to sit right under the selected line and
+jumped with every switch, so the hand had to find them again each time.
 
 There is no status dot: the button carries that role — the active machine
 is blue, an unreachable one is grey and not clickable.
@@ -148,6 +149,11 @@ async def build(hosts: list[Host], active: Host | None, user_id: int,
                 active_terminal: int | None = None) -> InputRichMessage:
     """Builds the machine list message."""
     blocks: list = [InputRichBlockParagraph(text=[RichTextBold(text=TITLE)])]
+    # The actions are collected on the way and placed once, under the whole
+    # list. A selected window wins over a machine picked before it had any:
+    # the window is where commands actually go.
+    for_window: InputRichBlockButtons | None = None
+    for_machine: InputRichBlockButtons | None = None
 
     for h in hosts:
         tail = h.ip or ("computer" if h.kind == "agent" else "\u2014")
@@ -185,8 +191,8 @@ async def build(hosts: list[Host], active: Host | None, user_id: int,
                 RichTextItalic(text=f"  {tail}"),
             ]))
             if is_active:
-                blocks.append(_actions(h, user_id, None, 1,
-                                       await db.shares_of(h.id)))
+                for_machine = _actions(h, user_id, None, 1,
+                                       await db.shares_of(h.id))
             continue
 
         for number, term in enumerate(terminals, start=1):
@@ -203,9 +209,12 @@ async def build(hosts: list[Host], active: Host | None, user_id: int,
                 RichTextItalic(text=f"  {tail}" if number == 1 else ""),
             ]))
             if is_active:
-                blocks.append(_actions(h, user_id, term_id, len(terminals),
-                                       await db.shares_of(h.id)))
+                for_window = _actions(h, user_id, term_id, len(terminals),
+                                      await db.shares_of(h.id))
 
+    selected = for_window if for_window is not None else for_machine
+    if selected is not None:
+        blocks.append(selected)
     blocks.append(InputRichBlockButtons(align="left", buttons=[
         RichMessageButton(text=ADD_LABEL, callback_data="addhost",
                           style="success"),
@@ -215,7 +224,7 @@ async def build(hosts: list[Host], active: Host | None, user_id: int,
 
 def _actions(host: Host, user_id: int, terminal_id: int | None,
              total: int, shares: list) -> InputRichBlockButtons:
-    """Buttons under the selected line.
+    """Buttons for the selected line, shown at the bottom of the list.
 
     Closing is offered only when there is somewhere left to go: the last
     terminal is the machine itself, and Remove is the button for that.

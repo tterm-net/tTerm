@@ -23,6 +23,7 @@ import signal
 import sys
 import tempfile
 import time
+import traceback
 
 os.environ.setdefault("BOT_TOKEN", "test")
 TMP = tempfile.mkdtemp(prefix="tterm-test-")
@@ -1004,7 +1005,7 @@ async def test_sharing() -> None:
 
 
 async def test_machines_view() -> None:
-    """The machine list: the name is a button, actions sit under the selected one."""
+    """The machine list: the name is a button, actions for it sit at the bottom."""
     print("\nMachine list layout")
     import json as _json
 
@@ -1063,6 +1064,34 @@ async def test_machines_view() -> None:
                        ensure_ascii=False)
     check("a recipient has nothing to remove", "askrm" not in gtxt)
     check("a recipient sees whose machine it is", "from " in gtxt)
+
+    # The actions live in one place, under the whole list. Under the selected
+    # line they jumped with every switch and had to be found again each time.
+    first_win = await db.ensure_terminal(uid, srv)
+    second_win = await db.open_terminal(uid, srv)
+    shapes, action_rows = [], []
+    for picked in (first_win, second_win):
+        view = await machines.build(hosts, active, uid, {srv: True, mac: True},
+                                    picked)
+        blks = view.model_dump(exclude_none=True, mode="json")["blocks"]
+        shapes.append([b["type"] for b in blks])
+        rows = [i for i, b in enumerate(blks) if b["type"] == "buttons"]
+        action_rows.append((rows, blks))
+    check("the actions sit at the bottom, right above the add button",
+          all(rows == [len(blks) - 2, len(blks) - 1]
+              and blks[-1].get("buttons", [{}])[0].get("text") == machines.ADD_LABEL
+              and any(b["text"] == "+ Terminal"
+                      for b in blks[-2].get("buttons", []))
+              for rows, blks in action_rows),
+          str([rows for rows, _ in action_rows]))
+    check("switching windows does not move them", shapes[0] == shapes[1],
+          str(shapes))
+    check("they act on the selected window",
+          all(any(b.get("callback_data") == f"renameterm:{picked}"
+                  for b in blks[-2].get("buttons", []))
+              for picked, (_, blks) in zip((first_win, second_win), action_rows)),
+          "Rename has to point at the blue line, not at the one above it")
+    await db.close_terminal(second_win)
 
     # A placeholder must not steal the selection from a working machine:
     # tapping "Computer" used to make it active and commands went to a machine
@@ -2268,38 +2297,73 @@ async def test_resilience() -> None:
           "otherwise yesterday's commands run on the server at startup")
 
 
+async def _run(step, *args):
+    """Runs one test; if it raises, that is a failure and the run goes on.
+
+    An exception used to escape main() while the database worker thread was
+    still running, so the process hung for good. Piped through `grep "✗"`,
+    the traceback was filtered out too: the command simply never returned,
+    with nothing on screen to say where it stopped.
+    """
+    try:
+        result = step(*args)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
+    except Exception as exc:  # reporting it is the whole point
+        check(f"{step.__name__} ran to the end", False,
+              f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        return None
+
+
+async def test_runner_guard() -> None:
+    """A test that raises is counted and named, and the next one still runs."""
+    print("\nTest runner")
+    import contextlib
+    import io
+
+    global _passed, _failed
+    saved = (_passed, _failed)
+
+    async def raises_on_purpose():
+        raise KeyError("buttons")
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        result = await _run(raises_on_purpose)
+    counted = _failed == saved[1] + 1
+    # The probe's own failure is not a real one: put the counters back.
+    _passed, _failed = saved
+    check("a test that raises counts as a failure", counted,
+          out.getvalue()[-300:])
+    check("the report names it and the error",
+          "raises_on_purpose" in out.getvalue() and "KeyError" in out.getvalue())
+    check("and the run goes on", result is None)
+
+
 async def main() -> int:
     print("=" * 58)
     print("  tterm — end-to-end tests")
     print("=" * 58)
 
-    host_id, user_id = await test_onboarding()
+    ids = await _run(test_onboarding)
+    host_id, user_id = ids if ids else (None, None)
     try:
         with _Watchdog(120, "block parsing on a PTY"):
-            test_block_framing()
+            await _run(test_block_framing)
     except TimeoutError as exc:
         check(f"the parsing block finished ({exc})", False)
-    await test_recording(host_id, user_id)
-    test_certificates()
-    await test_agent()
-    await test_agent_channels()
-    await test_sharing()
-    await test_machines_view()
-    await test_terminals()
-    await test_output_thresholds()
-    await test_live_output()
-    await test_input_while_running()
-    await test_output_cap()
-    await test_zsh()
-    await test_reaper()
-    await test_short_paths()
-    await test_condensed_caption()
-    await test_dangerous_commands()
-    await test_host_key_pinning()
-    await test_shutdown()
-    await test_resilience()
-    test_rendering()
-    await test_buttons()
+    await _run(test_recording, host_id, user_id)
+    for step in (test_certificates, test_agent, test_agent_channels,
+                 test_sharing, test_machines_view, test_terminals,
+                 test_output_thresholds, test_live_output,
+                 test_input_while_running, test_output_cap, test_zsh,
+                 test_reaper, test_short_paths, test_condensed_caption,
+                 test_dangerous_commands, test_host_key_pinning,
+                 test_shutdown, test_resilience, test_rendering,
+                 test_buttons, test_runner_guard):
+        await _run(step)
 
     await db.close()
     shutil.rmtree(TMP, ignore_errors=True)
@@ -2311,4 +2375,10 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    code = asyncio.run(main())
+    # A crashed test can leave a thread behind, a server or a database
+    # worker, and the interpreter would wait for it after the summary.
+    # A run that never returns looks like one still in progress.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
