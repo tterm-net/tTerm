@@ -56,7 +56,10 @@ class SessionManager:
                      user_id, host.id, terminal_id, host.name, host.kind)
             # The transport follows the host kind: we dial out to a server,
             # a laptop dials in to us.
-            session = AgentSession(host) if host.kind == "agent" else ShellSession(host)
+            # A window on an agent names its own shell there by the terminal
+            # id; without it every window typed into the same one.
+            session = (AgentSession(host, terminal_id) if host.kind == "agent"
+                       else ShellSession(host))
             await session.connect()
             self._sessions[key] = session
             self._db_session_ids[key] = await db.open_session(user_id, host.id)

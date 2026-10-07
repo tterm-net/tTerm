@@ -31,6 +31,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..core.config import config
 from ..core.db import Host, db
+from ..core.session_base import SessionBusy, ShellExited
 from ..core.danger import (CONFIRM_WINDOW, hits_everything,
                            looks_destructive)
 from ..core.live import LiveOutput, YES_NO, is_yes_no
@@ -494,6 +495,22 @@ async def cb_new_terminal(call: CallbackQuery) -> None:
     host = await db.get_host(host_id)
     if call.message is None or host is None:
         return
+
+    # An older agent keeps one shell for the whole computer, so a second
+    # window there is a second view of the same shell, not a separate one.
+    # Better said up front than found out when a cd in one moves the other.
+    link = agents.get(host.id) if host.kind == "agent" else None
+    if link is not None and not link.channels:
+        await call.message.answer(
+            f"⚠️ <b>{html.escape(host.name)}</b> runs agent "
+            f"{html.escape(link.version or 'of an older version')}, which "
+            "keeps one shell for all windows: a <code>cd</code> in one moves "
+            "the others, and while a command runs in one window, the rest "
+            "wait.\n\nTo give each window its own shell, update the agent: "
+            "<code>/addhost</code> → Computer, then run the command it gives "
+            "on that computer again. The machine stays in the list as it is.",
+            parse_mode=ParseMode.HTML)
+
     await select_terminal(call.bot, call.message.chat.id, call.from_user.id,
                           host, term_id)
     await show_machines(call.bot, call.message.chat.id, call.from_user.id, call)
@@ -954,9 +971,22 @@ async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host,
     real command answers faster.
     """
     icon = PC_ICON if host.kind == "agent" else SERVER_ICON
+    if terminal_id is None:
+        terminal_id = await db.ensure_terminal(user_id, host.id)
+    if sessions.is_running(terminal_id):
+        # Something is running in this window – a server, a long build. The
+        # prompt is fetched by running a command of our own, which would have
+        # to wait behind it, possibly forever; switching to the window then
+        # looked like the bot had frozen.
+        label = await machines.label_for(host, user_id, terminal_id)
+        await bot.send_message(
+            chat_id,
+            f"{icon} <b>{html.escape(label)}</b>\n"
+            "<i>A command is still running here. Whatever you type goes to "
+            "it; the Stop button is under its output.</i>",
+            parse_mode=ParseMode.HTML)
+        return
     try:
-        if terminal_id is None:
-            terminal_id = await db.ensure_terminal(user_id, host.id)
         block = await sessions.execute(user_id, host, "true",
                                        terminal_id=terminal_id)
         label = await machines.label_for(host, user_id, terminal_id)
@@ -964,7 +994,7 @@ async def send_prompt(bot: Bot, chat_id: int, user_id: int, host: Host,
         await bot.send_message(
             chat_id,
             f"{icon} <b>{html.escape(host.name)}</b>\n"
-            f"<i>{html.escape(str(exc)[:200])}</i>",
+            f"<i>{html.escape(str(exc)[:400])}</i>",
             parse_mode=ParseMode.HTML)
         return
 
@@ -1718,6 +1748,11 @@ async def run_command(message: Message, bot: Bot) -> None:
                                        terminal_id=terminal_id,
                                        on_progress=on_progress,
                                        on_idle=on_idle)
+    except (SessionBusy, ShellExited) as exc:
+        # Nothing is broken here, so no "check that it is alive".
+        await message.answer(f"⚠️ {html.escape(str(exc))}",
+                             parse_mode=ParseMode.HTML)
+        return
     except ConnectionError as exc:
         await message.answer(
             f"⚠️ {html.escape(str(exc))}\n\n"

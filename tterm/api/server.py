@@ -188,6 +188,9 @@ async def agent_socket(ws: WebSocket) -> None:
             host_id=host.id, owner_id=host.owner_id, name=host.name,
             os_info=hello.get("os", ""), version=hello.get("agent", ""),
             shell=(hello.get("shell") or "bash"),
+            # A shell per terminal window, if the agent can. An older one says
+            # nothing and keeps a single shell for the whole machine.
+            channels=bool(hello.get("channels")),
             send=send,
         )
         registry.attach(link)
@@ -202,7 +205,9 @@ async def agent_socket(ws: WebSocket) -> None:
             msg = await ws.receive_json()
             kind = msg.get("t")
             if kind == "out":
-                await link.push(msg.get("data", ""))
+                await link.push(msg.get("ch"), msg.get("data", ""))
+            elif kind == "exit":
+                link.exited(msg.get("ch"))
             elif kind in ("hb", "pong"):
                 # Answering is mandatory. The agent treats a long silence as
                 # a dead link, and apart from commands there is nothing for us
@@ -215,8 +220,13 @@ async def agent_socket(ws: WebSocket) -> None:
         log.exception("The agent connection broke")
     finally:
         if link is not None:
-            registry.detach(link.host_id)
-            log.info("Agent disconnected: host=%s", link.host_id)
+            if registry.detach(link):
+                log.info("Agent disconnected: host=%s", link.host_id)
+            else:
+                # The agent has already reconnected; this was the old line,
+                # noticed late. The new one stays.
+                log.info("An old connection of host=%s closed, a newer one "
+                         "is in use", link.host_id)
 
 
 @router.get("/ca.pub", response_class=PlainTextResponse)

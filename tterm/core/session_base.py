@@ -39,6 +39,23 @@ MAX_LIVE_BYTES = 4_000_000
 #: on_progress because silence, not new output, is what makes it interesting.
 IdleCallback = Callable[[str], Awaitable[None]]
 
+
+class SessionBusy(Exception):
+    """The shell this window types into is busy with another window's command.
+
+    Only an older agent gets here: it keeps one shell for the whole computer.
+    Not a ConnectionError on purpose – that one makes the pool reconnect and
+    run the command again, and the shell is not broken, only taken.
+    """
+
+
+class ShellExited(Exception):
+    """The window's shell ended while a command ran: `exit`, or it died.
+
+    Not a ConnectionError either: running the command again in a fresh shell
+    would repeat whatever ended the first one.
+    """
+
 #: Called as output arrives, used to stream long-running commands.
 ProgressCallback = Callable[[str], Awaitable[None]]
 

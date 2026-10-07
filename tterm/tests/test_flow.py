@@ -502,6 +502,155 @@ def test_certificates() -> None:
           line.startswith("ssh-ed25519 ") and "\n" not in line)
 
 
+async def test_agent_channels() -> None:
+    """Every terminal window on an agent computer has its own shell."""
+    print("\nAgent windows")
+    from tterm.core.agent_hub import (INBOX_LIMIT, AgentLink, AgentSession,
+                                      SharedShellBusy, registry)
+
+    sent: list[dict] = []
+
+    async def capture(msg: dict) -> None:
+        sent.append(msg)
+
+    class Host:
+        id, name, kind = 4242, "WindowsTest", "agent"
+
+    def link_for(channels: bool) -> AgentLink:
+        return AgentLink(host_id=Host.id, owner_id=1, name=Host.name,
+                         os_info="", version="0.9.0" if not channels else "0.10.0",
+                         shell="bash", send=capture, channels=channels)
+
+    # --- a current agent: a shell per window --------------------------------
+    link = link_for(True)
+    registry.attach(link)
+    a, b = AgentSession(Host(), 11), AgentSession(Host(), 12)
+    link.channel(11).booted = link.channel(12).booted = True
+    await link.push(11, "only for eleven")
+    check("output reaches its own window only",
+          link.channel(11).drain_nowait() == "only for eleven"
+          and link.channel(12).drain_nowait() == "")
+    await link.push(99, "for a window we already closed")
+    check("output for a closed window is dropped, not kept",
+          link.peek(99) is None)
+
+    sent.clear()
+    await a._write("ls\n")
+    check("input names its window", sent and sent[-1].get("ch") == 11, str(sent))
+    link.exited(12)
+    check("a shell that exited is no longer alive", not b.is_alive and a.is_alive,
+          "the next command bootstraps a fresh shell instead of waiting forever")
+
+    # `exit` in a window: the agent reports the shell gone, and the command
+    # that ended it must not sit there until the five-minute timeout.
+    from tterm.core.session_base import ShellExited
+    link.channel(12).booted = True
+    started = time.monotonic()
+    pending = asyncio.create_task(b.run("exit", timeout=30))
+    await asyncio.sleep(0.3)
+    link.exited(12)
+    ended = None
+    try:
+        await asyncio.wait_for(pending, 5)
+    except ShellExited:
+        ended = time.monotonic() - started
+    except asyncio.TimeoutError:
+        pass
+    check("a window whose shell exits answers at once",
+          ended is not None and ended < 3, f"{ended}")
+
+    sent.clear()
+    link.channel(11).users.add(11)
+    await a.close()
+    check("closing a window closes its shell only",
+          sent == [{"t": "close", "ch": 11}], str(sent))
+    check("and forgets it", link.peek(11) is None)
+    check("the reaper tidying one window leaves the others alone",
+          link.peek(12) is not None)
+
+    # --- an older agent: one shell for the whole machine -------------------
+    old = link_for(False)
+    registry.attach(old)
+    x, y = AgentSession(Host(), 21), AgentSession(Host(), 22)
+    shared = old.channel(21)
+    check("an older agent's windows share its one shell",
+          shared is old.channel(22))
+    shared.booted = True
+    shared.users.update({21, 22})
+
+    sent.clear()
+    await x._write("pwd\n")
+    check("an older agent gets no channel numbers",
+          sent and "ch" not in sent[-1], str(sent))
+
+    await shared.lock.acquire()          # window 21 is running something
+    try:
+        busy = None
+        try:
+            await y.run("echo hi", timeout=2)
+        except SharedShellBusy as exc:
+            busy = str(exc)
+        check("a busy shared shell answers at once instead of hanging",
+              busy is not None and "gives each window its own" in busy,
+              "it used to wait for the command in the other window – a "
+              "server, forever – and type into it")
+    finally:
+        shared.lock.release()
+
+    sent.clear()
+    await x.close()
+    check("closing one window keeps the shared shell for the other",
+          sent == [] and shared.booted, str(sent))
+    await y.close()
+    check("the last window out closes it",
+          sent == [{"t": "close"}], str(sent))
+
+    # --- a reconnect noticed late -----------------------------------------
+    first, second = link_for(True), link_for(True)
+    registry.attach(first)
+    registry.attach(second)           # the agent reconnected
+    gone = registry.detach(first)     # the old connection's cleanup, late
+    check("cleaning up an old connection keeps the new one",
+          not gone and registry.get(Host.id) is second,
+          "the agent stayed connected while the bot showed it offline – "
+          "exactly the unexplained drop of 10 September")
+    registry.detach(second)
+
+    # --- memory ------------------------------------------------------------
+    noisy = link_for(True)
+    noisy.channel(5)
+    for i in range(INBOX_LIMIT + 500):
+        await noisy.push(5, "x")
+    check("an unread window cannot pile up output without end",
+          noisy.channel(5).inbox.qsize() <= INBOX_LIMIT)
+
+    # --- the wiring --------------------------------------------------------
+    api = (pathlib.Path(__file__).resolve().parents[1] / "api" / "server.py"
+           ).read_text("utf-8")
+    check("the hub asks the agent whether it can",
+          'channels=bool(hello.get("channels"))' in api)
+    check("and routes output and exits by window",
+          'link.push(msg.get("ch"), msg.get("data", ""))' in api
+          and 'link.exited(msg.get("ch"))' in api)
+    check("a late cleanup only removes its own link",
+          "if registry.detach(link):" in api)
+
+    pool = (pathlib.Path(__file__).resolve().parents[1] / "core"
+            / "session_manager.py").read_text("utf-8")
+    check("each window's session names its shell",
+          "AgentSession(host, terminal_id)" in pool)
+
+    handlers = (pathlib.Path(__file__).resolve().parents[1] / "bot"
+                / "handlers.py").read_text("utf-8")
+    check("switching to a busy window does not wait behind its command",
+          handlers.index("if sessions.is_running(terminal_id):")
+          < handlers.index('block = await sessions.execute(user_id, host, "true",'),
+          "the prompt is fetched by a command that would queue behind a "
+          "server forever")
+    check("a new window on an older agent says it shares the shell",
+          "keeps one shell for all windows" in handlers)
+
+
 async def test_agent() -> None:
     """The agent: a machine dials in because a laptop cannot be dialled."""
     print("\nAgent")
@@ -1691,10 +1840,26 @@ async def test_zsh() -> None:
         # agent used to drop the whole connection on it, so every idle timeout
         # took the machine out of the list for as long as reconnecting took.
         check("an idle close keeps the connection",
-              "keeping the link" in a and "shell.restart()" in a,
+              "keeping the link" in a and "if shells.close(ch):" in a,
               "dropping the link here makes the machine blink offline")
-        check("the shell is replaced, not just stopped",
-              "def restart" in a and "self.generation += 1" in a)
+        # One shell per terminal window. With one per machine the windows
+        # were labels only: cd in one moved all, a command in one went into
+        # whatever ran in another, closing one killed the rest.
+        check("each terminal window gets its own shell",
+              "class Shells" in a and 'msg["ch"] = ch' in a)
+        check("the agent says it can",
+              '"channels": 1' in a,
+              "the hub only sends channel numbers to an agent that asks")
+        check("an older hub still gets a single shell",
+              "self.legacy_gone" in a and "if ch is None:" in a,
+              "replies without a channel, and a dead shell drops the link "
+              "the way that hub expects")
+        check("a shell that exits on its own is reported",
+              '{"t": "exit"}' in a,
+              "or the hub types into a fresh shell with no prompt marker")
+        check("readers have their own thread pool",
+              "READERS" in a and "max_workers=MAX_SHELLS" in a,
+              "the default pool is sized by CPU and runs out with many windows")
         check("the child is ended before its descriptor",
               a.index("os.kill(self.pid, signal.SIGHUP)")
               < a.index("os.close(self.fd)"),
@@ -2117,6 +2282,7 @@ async def main() -> int:
     await test_recording(host_id, user_id)
     test_certificates()
     await test_agent()
+    await test_agent_channels()
     await test_sharing()
     await test_machines_view()
     await test_terminals()
